@@ -1,0 +1,9 @@
+# Include the license file
+include LICENSE.txt
+include requirements.txt
+include test_requirements.txt
+include tox.ini
+graft tests
+
+[metadata]
+description-file = README.md

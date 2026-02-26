@@ -1,0 +1,109 @@
+# Open-source default training config (Chengdu)
+project:
+  name: trajflow_open_source
+  output_dir: ./outputs
+  seed: 42
+
+data:
+  dataset_type: bwtraj
+  region: Chengdu
+  dataset_folder: ""
+  sample_count: -1
+  trajectory_length: 120
+  batch_size: 256
+  parametrized: true
+  parametrized_method: rdp_k
+  parametrized_M: 10
+  norm1by1: true
+  od_finer: true
+  geohash: false
+  AOITYPE: false
+  AOIEMB: false
+
+flow_matching:
+  enabled: true
+  dropout_prob: 0.1
+  flow_type: standard
+
+ddpm:
+  enabled: false
+  beta_schedule: linear
+  beta_start: 0.000001
+  beta_end: 0.05
+  num_diffusion_timesteps: 300
+  ddim_steps: 300
+
+condition:
+  enabled: true
+  condition_type: full
+  transportation_mode: true
+  embedding_type: wide_and_deep
+  cfg_scale: 1
+
+model:
+  type: unet
+  hidden_dim: 512
+
+training:
+  num_epochs: 5000
+  learning_rate: 0.0001
+  print_every: 100
+  save_every: 500
+  viz_bool: false
+  early_stop_patience: 5000
+  early_stop_delta: 0.000001
+  device: cuda:0
+
+solver:
+  method: euler
+  step_size: 0.01
+
+inference:
+  num_samples: 200
+  num_steps: 10
+  sampling_method: em
+
+visualization:
+  num_samples: 200
+  create_gif: false
+  fps: 2
+  norm1by12origialvis: true
+
+unet:
+  type: bayesian
+  guidance_scale: 3
+  in_channels: 2
+  out_ch: 2
+  ch: 128
+  ch_mult: [1, 2, 2, 2]
+  num_res_blocks: 2
+  attn_resolutions: [16]
+  dropout: 0.1
+  var_type: fixedlarge
+  ema_rate: 0.9999
+  ema: true
+  resamp_with_conv: true
+  grid_dim: 512
+
+baseline:
+  enabled: false
+  type: markov
+  model:
+    architecture:
+      latent_dim: 256
+      hidden_dim: 512
+      num_layers: 10
+    markov_architecture:
+      order: 1
+      n_components: 5
+      covariance_type: full
+      grid_size: 100
+  training:
+    gan_config:
+      d_lr: 0.0002
+      g_lr: 0.0002
+    vae_config:
+      beta: 1.0
+    markov_config:
+      min_trajectory_length: 5
+      max_trajectory_length: 120

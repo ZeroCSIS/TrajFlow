@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+
+# Data and outputs
+/data/*
+!/data/README.md
+outputs/
+outputs_*/
+generate_results/
+generate_results_*/
+logs/
+analysis_outputs/
+
+# Models and large binaries
+*.pt
+*.pth
+*.pkl
+*.npy
+*.zip
+
+# IDE
+.idea/
+.vscode/

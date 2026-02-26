@@ -1,0 +1,17 @@
+flow_matching @ git+https://github.com/facebookresearch/flow_matching.git
+fastdtw
+geopandas
+jismesh
+matplotlib
+numpy
+pandas
+plotly
+pygeohash
+PyYAML
+rdp
+scikit-learn
+scipy
+seaborn
+torch
+torchdiffeq
+tqdm

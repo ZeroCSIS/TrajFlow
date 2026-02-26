@@ -1,4 +1,4 @@
-# [Paper Title] Official Implementation
+# [TrajFlow: nationwide Pseudo GPS Trajectory Generation with Flow Matching Models] Implementation
 
 ## Setup
 ```bash
@@ -14,8 +14,8 @@ Notes:
 ## Data
 This repository does not ship raw trajectories, private data, or model weights.
 Place prepared public DiDi data under `./data/` with folders like:
-- `./data/DiDiTaxi_Chengdu_traj=50000_len=120to999`
-- `./data/DiDiTaxi_XiAn_traj=50000_len=120to999`
+- `./data/DiDiTaxi_Chengdu`
+- `./data/DiDiTaxi_XiAn`
 
 ## Training
 ```bash

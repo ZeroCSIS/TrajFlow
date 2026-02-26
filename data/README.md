@@ -4,9 +4,8 @@ This folder is intentionally empty in the open-source release.
 
 Place prepared public DiDi datasets here before training/inference:
 
-- `data/DiDiTaxi_Chengdu_traj=50000_len=120to999`
-- `data/DiDiTaxi_XiAn_traj=50000_len=120to999`
-
+- `data/DiDiTaxi_Chengdu
+- `data/DiDiTaxi_XiAn
 Expected files in each dataset folder:
 
 - `conditions.pkl`

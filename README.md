@@ -5,16 +5,21 @@ Official implementation of **TrajFlow**.
 ![TrajFlow Motivation](assets/Fig1.png)
 
 ## Paper
+TrajFlow is a flow-matching based framework for pseudo GPS trajectory generation targeting multi-scale mobility patterns.
+
 - OpenReview page: https://openreview.net/forum?id=BDOldEjwCE
 - PDF: https://openreview.net/pdf?id=BDOldEjwCE
 
-TrajFlow is a flow-matching based framework for pseudo GPS trajectory generation.
-It targets multi-scale trajectory generation and supports training/inference on public-style trajectory datasets.
-
-## Open-Source Scope
+## Data Availability
 - This repository provides the training/inference/evaluation pipeline for TrajFlow.
 - The main paper conclusions are validated on **BW** data, which is commercial/private and not open-sourced here.
-- Open-source support is provided for **DiDi Chengdu/XiAn style data** to verify that the pipeline works on public-style data.
+- Open-source support is provided for **DiDi Chengdu/XiAn data** to verify that the pipeline works on public-style data.
+- This repository does **not** ship raw trajectories, private data, or model checkpoints.
+- We do **not** redistribute DiDi datasets. Please obtain data from official/authorized channels under your own compliance responsibility.
+
+Expected local layout for testing:
+- `./data/DiDiTaxi_Chengdu_traj`
+- `./data/DiDiTaxi_XiAn_traj`
 
 ## Setup
 ```bash
@@ -26,17 +31,6 @@ pip install -r requirements.txt
 Notes:
 - `flow_matching` is installed as an external dependency via `requirements.txt`.
 - This repository does not vendor a local `flow_matching/` copy.
-
-## Data Policy
-- This repository does **not** ship raw trajectories, private data, or model checkpoints.
-- We do **not** redistribute DiDi datasets in this repository.
-- Please obtain DiDi data from official/authorized channels under your own compliance responsibility.
-
-Expected local layout for testing:
-- `./data/DiDiTaxi_Chengdu_traj`
-- `./data/DiDiTaxi_XiAn_traj`
-
-Required files for each dataset folder are listed in `data/README.md`.
 
 ## Usage
 

@@ -196,14 +196,14 @@ class FlowMatchingDataset(Dataset):
            self.conditions = torch.FloatTensor(self.conditions)
 
     def _load_trajectory_data(self, config):
-        """Load trajectory data from BW dataset"""
+        """Load trajectory data from open-source dataset folders."""
         from data_utils import PrepareDataset
 
         # Define dataset folders
         PROJ_PATH = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         FOLDERS = {
-            'Chengdu': f'{PROJ_PATH}/data/DiDiTaxi_Chengdu_traj=50000_len=120to999',
-            'XiAn': f'{PROJ_PATH}/data/DiDiTaxi_XiAn_traj=50000_len=120to999',
+            'Chengdu': f'{PROJ_PATH}/data/DiDiTaxi_Chengdu_traj',
+            'XiAn': f'{PROJ_PATH}/data/DiDiTaxi_XiAn_traj',
         }
         custom_folder = config['data'].get('dataset_folder', '')
         if custom_folder:
@@ -216,6 +216,13 @@ class FlowMatchingDataset(Dataset):
             if region not in FOLDERS:
                 raise ValueError(f"Unsupported open-source region: {region}. Use Chengdu or XiAn.")
             self.input_folder = FOLDERS[region]
+            if not os.path.exists(self.input_folder):
+                import glob
+
+                fallback_candidates = glob.glob(f"{self.input_folder}*")
+                fallback_candidates = [p for p in fallback_candidates if os.path.isdir(p)]
+                if fallback_candidates:
+                    self.input_folder = sorted(fallback_candidates)[0]
         self.grid_encoding = 'jismesh'
         self.grid_metadata = {}
         (self.all_head, self.traj_mean, self.traj_std, self.lengths,

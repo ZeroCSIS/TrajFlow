@@ -659,8 +659,8 @@ def main():
     # Load data from open-source public regions only.
     PROJ_PATH = '.'
     FOLDERS = {
-        'Chengdu': f'{PROJ_PATH}/data/DiDiTaxi_Chengdu_traj=50000_len=120to999',
-        'XiAn': f'{PROJ_PATH}/data/DiDiTaxi_XiAn_traj=50000_len=120to999',
+        'Chengdu': f'{PROJ_PATH}/data/DiDiTaxi_Chengdu_traj',
+        'XiAn': f'{PROJ_PATH}/data/DiDiTaxi_XiAn_traj',
     }
     custom_folder = config['data'].get('dataset_folder', '')
     if custom_folder:
@@ -670,6 +670,13 @@ def main():
         if region not in FOLDERS:
             raise ValueError(f"Unsupported open-source region: {region}. Use Chengdu or XiAn.")
         folder = FOLDERS[region]
+        if not os.path.exists(folder):
+            import glob
+
+            fallback_candidates = glob.glob(f"{folder}*")
+            fallback_candidates = [p for p in fallback_candidates if os.path.isdir(p)]
+            if fallback_candidates:
+                folder = sorted(fallback_candidates)[0]
     (all_head, traj_mean, traj_std, lengths,
      cond_mean, cond_std, all_gt_data, grid_mapping_dict) = PrepareDataset.loadExistingData(
         folder, resample_length=config['data']['trajectory_length'])

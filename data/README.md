@@ -4,8 +4,8 @@ This folder is intentionally empty in the open-source release.
 
 Place prepared public DiDi datasets here before training/inference:
 
-- `data/DiDiTaxi_Chengdu_traj=50000_len=120to999`
-- `data/DiDiTaxi_XiAn_traj=50000_len=120to999`
+- `data/DiDiTaxi_Chengdu_traj`
+- `data/DiDiTaxi_XiAn_traj`
 
 Expected files in each dataset folder:
 

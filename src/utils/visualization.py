@@ -145,7 +145,7 @@ def visualize_trajectories(sol, ground_truth, M, parametrized,save_folder,**kwar
     - parametrized: Whether the data is parametrized or not
     """
     # Get the final generated samples (last timestep)
-    # if input is a list of samples, get the length of the list as the number of sample_count
+    # Accept either a list of samples or a NumPy array.
     if isinstance(sol, list):
         sample_count = len(sol)
         sol = np.array(sol)
@@ -169,7 +169,7 @@ def visualize_trajectories(sol, ground_truth, M, parametrized,save_folder,**kwar
         generated_trajectories = []
         for i in range(sample_count):
             sample_data = sol[i].reshape(M, 2)
-            # 根据不同的参数化方法创建不同的参数字典
+            # Build the parameter dictionary expected by the reconstruction helper.
             if para_method == 'rdp_k':
                 para_dict = {
                     'method': 'rdp_k',
@@ -178,7 +178,7 @@ def visualize_trajectories(sol, ground_truth, M, parametrized,save_folder,**kwar
                     'K_target': M
                 }
             elif para_method == 'dct_deviation':
-                # 对于dct_deviation方法，需要创建特定的参数结构
+                # dct_deviation uses explicit endpoint and coefficient fields.
                 para_dict = {
                     'method': 'dct_deviation',
                     'P_start': sample_data[0],
@@ -187,16 +187,16 @@ def visualize_trajectories(sol, ground_truth, M, parametrized,save_folder,**kwar
                     'N_uniform': M,
                     'M_coeffs': M - 2
                 }
-            else:  # dct和其他方法
-                para_dict = sample_data  # 直接使用重塑后的数据
+            else:
+                para_dict = sample_data
 
             points = para2point(para_dict, N_new=traj_length, method_override=para_method)
             if points is None:
-                print(f"警告：样本 {i} 重建失败，使用零填充")
+                print(f"Warning: failed to reconstruct sample {i}; using zeros instead")
                 points = np.zeros((M, 2))
             generated_trajectories.append(points)
 
-        # 同样处理ground_truth数��
+        # Apply the same reconstruction logic to the ground-truth samples.
         gt_trajectories = []
         for i in range(len(ground_truth)):
             sample_data = ground_truth[i].reshape(M, 2)
@@ -222,7 +222,7 @@ def visualize_trajectories(sol, ground_truth, M, parametrized,save_folder,**kwar
 
             points = para2point(para_dict, N_new=traj_length, method_override=para_method)
             if points is None:
-                print(f"警告：真实样本 {i} 重建失败，使用零填充")
+                print(f"Warning: failed to reconstruct ground-truth sample {i}; using zeros instead")
                 points = np.zeros((M, 2))
             gt_trajectories.append(points)
 

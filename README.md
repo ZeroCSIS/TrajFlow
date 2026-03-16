@@ -11,7 +11,7 @@ TrajFlow is a flow-matching based framework for pseudo GPS trajectory generation
 - PDF: https://openreview.net/pdf?id=BDOldEjwCE
 
 ## Data Availability
-- This repository provides the training/inference/evaluation pipeline for TrajFlow.
+- This repository provides the training and inference pipeline for TrajFlow.
 - The main paper conclusions are validated on **BW** data, which is commercial/private and not open-sourced here.
 - Open-source support is provided for **DiDi Chengdu/XiAn data** to verify that the pipeline works on public-style data.
 - This repository does **not** ship raw trajectories, private data, or model checkpoints.
@@ -48,13 +48,12 @@ python generate.py \
   --checkpoint ./outputs/models/run_YYYYMMDD_HHMMSS/best_model.pt
 ```
 
-Evaluation:
-```bash
-python eval_simple.py --result_dir /path/to/generation_folder
-```
+- Evaluation scripts are intentionally omitted from the open-source release to keep the repository focused on the core training/generation pipeline.
 
 ## License
-This codebase is released under **CC BY-NC 4.0** (`LICENSE`).
+Unless otherwise noted, the original code in this repository is released under **CC BY-NC 4.0** (`LICENSE`).
+
+This repository also includes third-party code under separate licenses. For example, `src/utils/jismesh_v2/` is distributed under the **MIT License**; see `src/utils/jismesh_v2/LICENSE`.
 
 ## Citation
 If you use this repository, please cite:

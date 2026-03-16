@@ -26,22 +26,11 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if project_root not in sys.path:
     sys.path.append(project_root)
 
-from src.models.networks import ConditionalVelocityModel, MLP
 from src.data.dataset import FlowMatchingDataset
 from src.eval.inference import FlowMatchingInference
 
 # Device is resolved in main() from CLI/config.
 device = torch.device("cpu")
-
-
-# Config dictionary to object converter
-# class DictToObject:
-#     def __init__(self, dict_):
-#         for key, value in dict_.items():
-#             if isinstance(value, dict):
-#                 setattr(self, key, DictToObject(value))
-#             else:
-#                 setattr(self, key, value)
 
 
 # Field name mapping
@@ -108,21 +97,9 @@ def find_config_by_timestamp(exp_savename_str):
 
     return None, None, None
 
-# Not good enough, if generate_num is too big, may cause memory run out. So, write as a for loop, with generate_num%batch_size. And finally, concat all.
 def generate_trajectories(model, all_gt_data, all_head, lengths, traj_mean, traj_std,
                           cond_mean, cond_std, config, batch_size, num_batches,
                           result_dir, dataset, condition_mode="real", generate_num=10, save_dir='./test_output'):
-
-    # # Determine model type and set appropriate sampling parameters
-    # if config['flow_matching']['enabled']:
-    #     n_steps = config['inference']['num_steps']
-    #     solve_method = config['inference']['sampling_method']
-    #     print("Generating with Flow Matching...")
-    # elif config['ddpm']['enabled']:
-    #     n_steps = config['ddpm']['num_diffusion_timesteps'] // 10  # Use fewer steps for faster sampling
-    #     solve_method = 'ddim'  # DDIM sampling for DDPM
-    #     print("Generating with DDPM...")
-
     """Generate trajectories using flow matching model"""
     os.makedirs(save_dir, exist_ok=True)
 
@@ -159,8 +136,7 @@ def generate_trajectories(model, all_gt_data, all_head, lengths, traj_mean, traj
                                       save_dir=save_dir,
                                       device=device)
 
-    # Get sampling parameters from config
-    # if ddpm == enabled, then change args.steps to config_dict['ddpm']['ddim_steps']
+    # Use DDPM sampling steps for DDPM checkpoints, otherwise use inference settings.
     if config.get('ddpm', {}).get('enabled', False):
         n_steps = config['ddpm']['ddim_steps']
     else:
@@ -380,35 +356,6 @@ def generate_trajectories(model, all_gt_data, all_head, lengths, traj_mean, traj
 
     return total_gen_trajs, total_gt_trajs, total_cond_info
 
-    # # Transform data format, and save to csv
-    # gen_df = []
-    # gt_df = []
-    # # Convert trajectory data to simple dataframe format
-    # for i in range(len(all_sol_np[-1])):  # Use last timestep solutions
-    #     for j in range(M):
-    #         # For generated trajectories
-    #         gen_traj = all_sol_np[-1][i].reshape(M, 2)
-    #         gen_df.append({
-    #             "uid": i,
-    #             "lat": gen_traj[j, 0],
-    #             "lon": gen_traj[j, 1],
-    #         })
-    #
-    #         # For ground truth trajectories
-    #         gt_traj = combined_ground_truth[i].reshape(M, 2)
-    #         gt_df.append({
-    #             "uid": i,
-    #             "lat": gt_traj[j, 0],
-    #             "lon": gt_traj[j, 1],
-    #         })
-    # # Convert to pandas dataframes and save
-    # gen_df = pd.DataFrame(gen_df)
-    # gt_df = pd.DataFrame(gt_df)
-    # gen_df.to_csv(os.path.join(save_dir, "generated_trajectories_simple.csv"), index=False)
-    # gt_df.to_csv(os.path.join(save_dir, "ground_truth_trajectories_simple.csv"), index=False)
-
-    return total_gen_trajs, total_gt_trajs, total_cond_info
-
 def resample_trajectory(traj, target_length):
     """Resample a trajectory to the target length"""
     # Simple linear interpolation
@@ -481,12 +428,6 @@ def save_trajectories_to_csv(trajs, cond_info, cond_std, cond_mean, save_dir, tr
             })
 
     df = pd.DataFrame(rows)
-
-    # # Add origin and destination information
-    # df['O_lat'] = df.groupby('uid')['latitude'].transform('first')
-    # df['O_lon'] = df.groupby('uid')['longitude'].transform('first')
-    # df['D_lat'] = df.groupby('uid')['latitude'].transform('last')
-    # df['D_lon'] = df.groupby('uid')['longitude'].transform('last')
 
     df.to_csv(os.path.join(save_dir, f"{traj_type}_trajectories.csv"), index=False)
 
@@ -587,8 +528,6 @@ def main():
     else:
         with open(args.config, 'r') as f:
             config_dict = yaml.safe_load(f)
-        # config = DictToObject(config_dict)
-        # if args.ddim changed to ddim_steps, then change the config_dict['ddpm']['ddim_steps'] to args.steps
         config = config_dict
         model_dir = os.path.dirname(args.config)
 
@@ -691,29 +630,6 @@ def main():
 
     print(f"Model parameters: input_dim={input_dim}, hidden_dim={hidden_dim}, condition_dim={condition_dim}")
 
-    # # Initialize model based on config
-    # if config['model']['type'] == 'mlp' or config['model']['type'] == 'unet':
-    #     if config['condition']['enabled']:
-    #         model = ConditionalVelocityModel(
-    #             input_dim=input_dim,
-    #             hidden_dim=hidden_dim,
-    #             condition_dim=condition_dim,
-    #             embedding_dim=hidden_dim, #后面替换再config！！！
-    #             dropout_prob=config['flow_matching']['dropout_prob'],
-    #             config=config,
-    #             dataset=dataset
-    #         )
-    #     else:
-    #         model = MLP(input_dim=input_dim, hidden_dim=hidden_dim)
-    # elif config['model']['type'] == 'cnn':
-    #     model = CNN(input_dim=2, hidden_dim=hidden_dim)
-    # elif config['model']['type'] == 'transformer':
-    #     model = TransformerVelocity(input_dim=2, hidden_dim=hidden_dim)
-    # elif config['model']['type'] == 'bilstm':
-    #     model = BiLSTMVelocity(input_dim=2, hidden_dim=hidden_dim)
-    # else:
-    #     raise ValueError(f"Unknown model type: {config['model']['type']}")
-
     # Check if this is a baseline model from config
     if config.get('baseline', {}).get('enabled', True):
         model_type = config.get('baseline', {}).get('type', 'flow_matching')
@@ -796,19 +712,6 @@ def main():
         model.eval()
         print("Flow matching model loaded successfully")
 
-    # # Wrap the model
-    # model = ModelWrapper(model)
-
-    # Load checkpoint
-    checkpoint = torch.load(checkpoint_path, map_location=device)
-    if "model_state_dict" in checkpoint:
-        model.load_state_dict(checkpoint["model_state_dict"])
-    else:
-        model.load_state_dict(checkpoint)
-    model.to(device)
-    model.eval()
-    print("Model loaded successfully")
-
     # Print memory usage information
     if torch.cuda.is_available():
         allocated = torch.cuda.memory_allocated(device) / 1024**3
@@ -845,12 +748,6 @@ def main():
         generate_num = args.generate_num,
         save_dir=result_dir
     )
-
-    # # Visualize flow field
-    # try:
-    #     visualize_flow_field(model, config, result_dir, device)
-    # except Exception as e:
-    #     print(f"Error visualizing flow field (non-critical): {e}")
 
     print(f"Generation complete. Results saved to {result_dir}")
     print(f"Generated {len(gen_trajs)} trajectories using {args.steps} steps with {effective_method} method")

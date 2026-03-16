@@ -563,11 +563,9 @@ class TrajUnet(nn.Module):
 
         # downsampling
         hs = [self.conv_in(x)]
-        # print(hs[-1].shape)
         for i_level in range(self.num_resolutions):
             for i_block in range(self.num_res_blocks):
                 h = self.down[i_level].block[i_block](hs[-1], temb)
-                # print(i_level, i_block, h.shape)
                 if len(self.down[i_level].attn) > 0:
                     h = self.down[i_level].attn[i_block](h)
                 hs.append(h)
@@ -575,13 +573,10 @@ class TrajUnet(nn.Module):
                 hs.append(self.down[i_level].downsample(hs[-1]))
 
         # middle
-        # print(hs[-1].shape)
-        # print(len(hs))
         h = hs[-1]  # [10, 256, 4, 4]
         h = self.mid.block_1(h, temb)
         h = self.mid.attn_1(h)
         h = self.mid.block_2(h, temb)
-        # print(h.shape)
         # upsampling
         for i_level in reversed(range(self.num_resolutions)):
             for i_block in range(self.num_res_blocks + 1):
@@ -591,7 +586,6 @@ class TrajUnet(nn.Module):
                                                 (0, ht.size(-1) - h.size(-1)))
                 h = self.up[i_level].block[i_block](torch.cat([h, ht], dim=1),
                                                     temb)
-                # print(i_level, i_block, h.shape)
                 if len(self.up[i_level].attn) > 0:
                     h = self.up[i_level].attn[i_block](h)
             if i_level != 0:
@@ -691,15 +685,6 @@ class WideAndDeep(nn.Module):
         location_emb_dim = location_emb_dim + self.encoding_bias
         config = Dict2Obj(config)
         self.config = config
-        # if hasattr(config.data, 'AOITYPE'):
-        #     if config.data.AOITYPE == True:
-        #         self.aoi_emd = True
-        #     elif config.data.AOIEMB == True:
-        #         self.aoi_emd = True
-        #     else:
-        #         self.aoi_emd = False
-        # else:
-        #     self.aoi_emd = False
         # Wide part (linear model for continuous attributes)
         self.wide_fc = nn.Linear(5, embedding_dim)
         # Deep part (neural network for categorical attributes)
@@ -717,7 +702,7 @@ class WideAndDeep(nn.Module):
             self.tmode_embedding = nn.Embedding(tmode_number, hidden_dim)
             self.deep_fc1 = nn.Linear(hidden_dim*4, embedding_dim)
         self.deep_fc2 = nn.Linear(embedding_dim, embedding_dim)
-        # config.data.AOITYPE == True or config.data.AOITYPE not exist
+        # Open-source configs omit AOI features; default them to disabled.
         if not hasattr(config.data, 'AOITYPE'):
             config.data.AOITYPE = False
         if not hasattr(config.data, 'AOIEMB'):
@@ -879,7 +864,6 @@ class ConditionalVelocityModel(nn.Module):
             y_t = y_t.swapaxes(1, 2)
             if self.config['data']['od_finer'] == False:
                 y_t = y_t
-                # y_t = y_t.view(x.size(0), self.input_dim//2, 2)
             else:
                 y_t = y_t
         else:
@@ -891,7 +875,6 @@ class ConditionalVelocityModel(nn.Module):
                     c = c * mask
                 elif self.training:
                     pass
-                    # c = self.condition_dropout(c) # Not applicable for WideAndDeep because condition contains discrete  features
                 # Process condition embedding
                 c = self.condition_embedding_model(c)
                 # Concatenate inputs

@@ -1,3 +1,4 @@
+chardet
 flow_matching @ git+https://github.com/facebookresearch/flow_matching.git
 fastdtw
 geopandas

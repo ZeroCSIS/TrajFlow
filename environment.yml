@@ -13,6 +13,7 @@ dependencies:
   - pip
   - tqdm
   - pip:
+    - chardet
     - pre-commit
     - black==22.6.0
     - usort==1.0.4

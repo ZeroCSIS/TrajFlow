@@ -55,8 +55,7 @@ class FlowMatchingTrainer:
             self.optimizer,
             mode='min',
             factor=0.5,
-            patience=200,
-            # verbose=True
+            patience=200
         )
 
         # Add early stopping parameters
@@ -170,10 +169,6 @@ class FlowMatchingTrainer:
         alpha_cumprod_t = self.alphas_cumprod[t].view(-1, 1)
         x_t = torch.sqrt(alpha_cumprod_t) * x_1 + torch.sqrt(1 - alpha_cumprod_t) * noise
 
-        # Predict noise using the same neural network
-        # For DDPM, we predict noise instead of velocity
-        #predicted_noise = self.model(x_t, t.float() / num_timesteps, condition)
-
         cfg_scale = self.config['condition'].get('cfg_scale', 1.0)
         dropout_prob = self.config['flow_matching'].get('dropout_prob', 0.1)
         if dropout_prob > 0:
@@ -234,14 +229,6 @@ class FlowMatchingTrainer:
             else:
                 # Normal conditional forward pass
                 pred_v = self.model(path_sample.x_t, path_sample.t, condition)
-
-            # cfg_scale = self.config['condition'].get('cfg_scale', 1.0)
-            # if dropout_prob > 0:
-            #     # Create wrapper with cfg_scale=0 for training (forces random dropout)
-            #     wrapped_model = ConditionedVelocityModelWrapper(self.model, condition, cfg_scale)
-            #     pred_v = wrapped_model(path_sample.x_t, path_sample.t)
-            # else:
-            #     pred_v = self.model(path_sample.x_t, path_sample.t, condition)
 
         else:
             # Unconditional case

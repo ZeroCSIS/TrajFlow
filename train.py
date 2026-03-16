@@ -10,8 +10,6 @@ from src.training.trainer import FlowMatchingTrainer
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Flow Matching Training')
-    # parser.add_argument('--config', type=str, default='config/config.yaml',
-    #                     help='Path to configuration file')
     parser.add_argument('--config', type=str, default='./src/config/config_chengdu.yaml',
                         help='Path to configuration file')
     parser.add_argument('--output', type=str, default='./outputs',

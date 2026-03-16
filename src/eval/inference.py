@@ -77,7 +77,7 @@ class ConditionedVelocityModelWrapper(torch.nn.Module):
         self.velocity_model = velocity_model
         self.condition = condition
         self.cfg_scale = cfg_scale
-        # if extra kwargs are provided, initialize them
+        # Initialize any extra keyword attributes on the manager instance.
         self.mapping_dict = kwargs.get('mapping_dict', None)
         self.norm1by1_viz = kwargs.get('norm1by1_viz', False)
 
@@ -185,60 +185,6 @@ class FlowMatchingInference:
             return 'ddpm'
         else:
             raise ValueError("No model type specified")
-
-    # def _sample_ddpm(self, n_samples, condition=None):
-    #     """DDPM sampling using DDIM"""
-    #
-    #     n_steps = self.config['ddpm']['ddim_steps']
-    #
-    #     # Create beta schedule
-    #     num_timesteps = self.config['ddpm']['num_diffusion_timesteps']
-    #     beta_start = self.config['ddpm']['beta_start']
-    #     beta_end = self.config['ddpm']['beta_end']
-    #     betas = torch.linspace(beta_start, beta_end, num_timesteps, device=self.device)
-    #     alphas = 1 - betas
-    #     alphas_cumprod = torch.cumprod(alphas, dim=0)
-    #
-    #     # Start from pure noise
-    #     # Generate initial random points (noise)
-    #     if self.config['data']['od_finer']:
-    #         x_init = torch.randn((n_samples, self.M*2+4), dtype=torch.float32, device=self.device)
-    #     else:
-    #         x_init = torch.randn((n_samples,self.M,2), dtype=torch.float32, device=self.device)
-    #     x = x_init.clone()
-    #
-    #     # Create sampling timesteps (reverse order)
-    #     timesteps = torch.linspace(num_timesteps - 1, 0, n_steps, dtype=torch.long, device=self.device)
-    #
-    #     samples = [x.clone()]
-    #
-    #     for i, t in enumerate(timesteps):
-    #         t_batch = t.repeat(n_samples).to(self.device)
-    #
-    #         with torch.no_grad():
-    #             # Predict noise using the same neural network
-    #             predicted_noise = self.model(x, t_batch.float() / num_timesteps, condition)
-    #
-    #             # DDIM sampling step
-    #             alpha_t = alphas_cumprod[t]
-    #             alpha_prev = alphas_cumprod[t - 1] if t > 0 else torch.tensor(1.0, device=self.device)
-    #
-    #             # Predicted x_0
-    #             # reshape predicted_noise to match x shape
-    #             if predicted_noise.shape != x.shape:
-    #                 predicted_noise = predicted_noise.reshape(x.shape)
-    #             pred_x0 = (x - torch.sqrt(1 - alpha_t) * predicted_noise) / torch.sqrt(alpha_t)
-    #
-    #             # Direction to x_t
-    #             if t > 0:
-    #                 direction = torch.sqrt(1 - alpha_prev) * predicted_noise
-    #                 x = torch.sqrt(alpha_prev) * pred_x0 + direction
-    #             else:
-    #                 x = pred_x0
-    #
-    #             samples.append(x.clone())
-    #
-    #     return samples
 
     def _sample_baseline(self, n_samples, condition=None):
         """Sample from baseline models"""
@@ -410,7 +356,6 @@ class FlowMatchingInference:
             for j in range(condition_sample.shape[1]):
                 condition_sample[i][j] = grid_mapping_dict[onehoted_condition_sample[i][j]].astype(int)
 
-        # else:
         #     raise ValueError("Unknown encoding format. Use 'onehot' or 'embedding'.")
 
         # calculate the OD by lat/lon multipliers if given
@@ -464,19 +409,19 @@ class FlowMatchingInference:
 
             DENORM_METHOD = 'MixStrategy'  # Choose denormalization method
             if DENORM_METHOD == 'Affine':
-                # 各向异性缩放：分别对 x 和 y 计算缩放因子，保证 OD 严格对齐
+                # Apply anisotropic scaling so both endpoints match exactly.
                 for i in range(batch_size):
-                    # Get normalized trajectory (copy 避免 in-place 修改)
+                    # Work on a copy of the normalized trajectory to avoid in-place edits.
                     traj = trajectories_reshaped[i].copy()
-                    # 归一化轨迹起点和终点
-                    origin_norm = traj[0]  # 第一个点
-                    dest_norm = traj[-1]  # 最后一个点
+                    # Normalized trajectory endpoints.
+                    origin_norm = traj[0]
+                    dest_norm = traj[-1]
 
-                    # 目标 OD 坐标（严格给定的矩形）
+                    # Target origin/destination coordinates.
                     origin_target = condition_sample_lonlat[i, 0]
                     dest_target = condition_sample_lonlat[i, 1]
 
-                    # 计算 x 和 y 的缩放因子
+                    # Compute scale factors for the x and y dimensions.
                     norm_range_x = dest_norm[0] - origin_norm[0]
                     norm_range_y = dest_norm[1] - origin_norm[1]
                     target_range_x = dest_target[0] - origin_target[0]
@@ -493,39 +438,11 @@ class FlowMatchingInference:
                     else:
                         scale_y = target_range_y / norm_range_y
 
-                    # 对轨迹上每个点应用转换
+                    # Apply the transform to every point in the trajectory.
                     for j in range(traj_length):
                         denorm_trajectories[i, j, 0] = (traj[j, 0] - origin_norm[0]) * scale_x + origin_target[0]
                         denorm_trajectories[i, j, 1] = (traj[j, 1] - origin_norm[1]) * scale_y + origin_target[1]
 
-                # # Plot comparison before and after denormalization
-                # import matplotlib.pyplot as plt
-                # for i in range(min(5, batch_size)):  # Plot first 5 samples
-                #     fig, ax = plt.subplots(1, 2, figsize=(12, 5))
-                # 
-                #     # Plot original normalized trajectory
-                #     ax[0].plot(trajectories_reshaped[i, :, 0], trajectories_reshaped[i, :, 1], 'b-', linewidth=2)
-                #     ax[0].plot(trajectories_reshaped[i, 0, 0], trajectories_reshaped[i, 0, 1], 'go', markersize=8, label='起点')
-                #     ax[0].plot(trajectories_reshaped[i, -1, 0], trajectories_reshaped[i, -1, 1], 'ro', markersize=8, label='终点')
-                #     ax[0].set_title('归一化轨迹（原始）')
-                #     ax[0].legend()
-                #     ax[0].grid(True)
-                #     ax[0].axis('equal')
-                # 
-                #     # Plot denormalized trajectory
-                #     ax[1].plot(denorm_trajectories[i, :, 0], denorm_trajectories[i, :, 1], 'b-', linewidth=2)
-                #     ax[1].plot(condition_sample_lonlat[i, 0, 0], condition_sample_lonlat[i, 0, 1], 'go', markersize=8, label='目标起点')
-                #     ax[1].plot(condition_sample_lonlat[i, 1, 0], condition_sample_lonlat[i, 1, 1], 'ro', markersize=8, label='目标终点')
-                #     ax[1].plot(denorm_trajectories[i, 0, 0], denorm_trajectories[i, 0, 1], 'gx', markersize=8, label='实际起点')
-                #     ax[1].plot(denorm_trajectories[i, -1, 0], denorm_trajectories[i, -1, 1], 'rx', markersize=8, label='实际终点')
-                #     ax[1].set_title('反归一化轨迹')
-                #     ax[1].legend()
-                #     ax[1].grid(True)
-                #     ax[1].axis('equal')
-                # 
-                #     plt.tight_layout()
-                #     plt.show()
-                #     plt.close(fig)
 
 
             elif DENORM_METHOD == 'UniformPreserveAspect':
@@ -534,8 +451,8 @@ class FlowMatchingInference:
                 for i in range(batch_size):
                     traj_norm = trajectories_reshaped[i] # Shape (traj_length, 2)
 
-                    if traj_norm.shape[0] < 2: # 至少需要两个点来确定起终点
-                        denorm_trajectories[i] = traj_norm # 或者返回空/特定值？
+                    if traj_norm.shape[0] < 2:  # Need at least two points to define the endpoints.
+                        denorm_trajectories[i] = traj_norm
                         continue
 
                     # Normalized start and end points
@@ -566,7 +483,6 @@ class FlowMatchingInference:
                             # What was the fallback scale during standardization? We don't know it here!
                             # Best guess: Assume scale is 1.0, meaning the fallback std dev was also ~1.0 or trajectory was single point.
                             s = 1.0
-                            # print(f"Debug: Both normalized and target start/end are coincident for batch item {i}. Using scale=1.0.")
                         else:
                             # Normalized points are same, but target points differ. Problematic case.
                             print(f"Warning: Normalized start/end points are identical for batch item {i}, but target points differ. Cannot accurately recover scale. Using scale=1.0.")
@@ -594,7 +510,6 @@ class FlowMatchingInference:
 
                         # --- 4. Apply interpolated correction ---
                         # Use np.newaxis to make w broadcast correctly with (traj_length, 2) arrays
-                        # correction = w[:, np.newaxis] * start_error_vector + (1 - w)[:, np.newaxis] * end_error_vector
                         # More efficient calculation:
                         correction = start_error_vector + (end_error_vector - start_error_vector) * (1 - w)[:, np.newaxis]
 
@@ -607,35 +522,26 @@ class FlowMatchingInference:
                     # Assign the final, corrected trajectory to the output array
                     denorm_trajectories[i] = final_denorm_traj
 
-                    # --- Optional: Final Sanity Check ---
-                    # calculated_origin_final = denorm_trajectories[i, 0]
-                    # calculated_dest_final = denorm_trajectories[i, -1]
-                    # origin_error_final = np.linalg.norm(calculated_origin_final - origin_target)
-                    # dest_error_final = np.linalg.norm(calculated_dest_final - dest_target)
-                    # if origin_error_final > epsilon or dest_error_final > epsilon: # Check with smaller tolerance now
-                    #    print(f"!!! Critical Error: Endpoint forcing failed for batch item {i} !!!")
-                    #    print(f"  Final Origin Error: {origin_error_final:.2e}")
-                    #    print(f"  Final Dest Error:   {dest_error_final:.2e}")
 
             elif DENORM_METHOD == 'Affine_ExplicitParams':
             # --------------------------------------------------------------------
             # BEGINNING OF 'Affine_ExplicitParams' method logic (INLINED)
             # --------------------------------------------------------------------
-                epsilon = 1e-7  # 用于比较浮点数是否接近零的阈值
+                epsilon = 1e-7  # Threshold for near-zero floating-point comparisons.
 
-                for i in range(batch_size):  # 遍历批次中的每条轨迹
-                    traj_norm = trajectories_reshaped[i]  # 当前归一化轨迹 (L, 2)
+                for i in range(batch_size):
+                    traj_norm = trajectories_reshaped[i]  # Current normalized trajectory with shape (L, 2).
 
                     if traj_norm.shape[0] == 0:
                         continue
 
-                    origin_norm = traj_norm[0]  # 归一化起点
-                    dest_norm = traj_norm[-1] if traj_length > 1 else origin_norm  # 归一化终点
+                    origin_norm = traj_norm[0]
+                    dest_norm = traj_norm[-1] if traj_length > 1 else origin_norm
 
-                    origin_target = condition_sample_lonlat[i, 0]  # 原始目标起点 (lon, lat)
-                    dest_target = condition_sample_lonlat[i, 1]  # 原始目标终点 (lon, lat)
+                    origin_target = condition_sample_lonlat[i, 0]  # Target origin (lon, lat).
+                    dest_target = condition_sample_lonlat[i, 1]  # Target destination (lon, lat).
 
-                    # --- X维度参数 Ax, Bx 计算 (target_x = Ax * norm_x + Bx) ---
+                    # --- Solve Ax and Bx in target_x = Ax * norm_x + Bx. ---
                     norm_val1_x = origin_norm[0]
                     target_val1_x = origin_target[0]
                     norm_val2_x = dest_norm[0]
@@ -645,22 +551,22 @@ class FlowMatchingInference:
                     target_range_x = target_val2_x - target_val1_x
 
                     Ax = 0.0
-                    Bx = target_val1_x  # 如果 norm_range_x 为0, 所有点映射到 target_val1_x
+                    Bx = target_val1_x  # If norm_range_x is zero, map all points to target_val1_x.
 
                     if abs(norm_range_x) < epsilon:
-                        # Ax 保持为 0.0
-                        # Bx 保持为 target_val1_x
+                        # Keep Ax at 0.0.
+                        # Keep Bx at target_val1_x.
                         if abs(target_range_x) >= epsilon:
-                            print(f"警告 (样本 {i}, 维度 X, Affine_ExplicitParams): "
-                                  f"归一化X范围约等于0，但目标X范围 ({target_range_x:.2f}) 非0。"
-                                  f"所有反归一化后的X坐标将被设为目标起点X ({target_val1_x:.2f})。"
-                                  f"因此，目标终点X ({target_val2_x:.2f}) 将不会被此变换精确匹配。")
+                            print(f"Warning (sample {i}, X dimension, Affine_ExplicitParams): "
+                                  f"normalized X range is near zero, but the target X range ({target_range_x:.2f}) is not. "
+                                  f"All denormalized X coordinates will be set to the target origin X ({target_val1_x:.2f}). "
+                                  f"The target destination X ({target_val2_x:.2f}) will therefore not be matched exactly by this transform.")
                     else:
-                        # 正常情况
+                        # Regular case.
                         Ax = target_range_x / norm_range_x
                         Bx = target_val1_x - Ax * norm_val1_x
 
-                    # --- Y维度参数 Ay, By 计算 (target_y = Ay * norm_y + By) ---
+                    # --- Solve Ay and By in target_y = Ay * norm_y + By. ---
                     norm_val1_y = origin_norm[1]
                     target_val1_y = origin_target[1]
                     norm_val2_y = dest_norm[1]
@@ -670,27 +576,27 @@ class FlowMatchingInference:
                     target_range_y = target_val2_y - target_val1_y
 
                     Ay = 0.0
-                    By = target_val1_y  # 如果 norm_range_y 为0, 所有点映射到 target_val1_y
+                    By = target_val1_y  # If norm_range_y is zero, map all points to target_val1_y.
 
                     if abs(norm_range_y) < epsilon:
-                        # Ay 保持为 0.0
-                        # By 保持为 target_val1_y
+                        # Keep Ay at 0.0.
+                        # Keep By at target_val1_y.
                         if abs(target_range_y) >= epsilon:
-                            print(f"警告 (样本 {i}, 维度 Y, Affine_ExplicitParams): "
-                                  f"归一化Y范围约等于0，但目标Y范围 ({target_range_y:.2f}) 非0。"
-                                  f"所有反归一化后的Y坐标将被设为目标起点Y ({target_val1_y:.2f})。"
-                                  f"因此，目标终点Y ({target_val2_y:.2f}) 将不会被此变换精确匹配。")
+                            print(f"Warning (sample {i}, Y dimension, Affine_ExplicitParams): "
+                                  f"normalized Y range is near zero, but the target Y range ({target_range_y:.2f}) is not. "
+                                  f"All denormalized Y coordinates will be set to the target origin Y ({target_val1_y:.2f}). "
+                                  f"The target destination Y ({target_val2_y:.2f}) will therefore not be matched exactly by this transform.")
                     else:
-                        # 正常情况
+                        # Regular case.
                         Ay = target_range_y / norm_range_y
                         By = target_val1_y - Ay * norm_val1_y
 
-                    # 应用变换到当前轨迹的每个点
+                    # Apply the transform to every point in the current trajectory.
                     for j in range(traj_length):
                         norm_px = traj_norm[j, 0]
                         norm_py = traj_norm[j, 1]
 
-                        # 使用 denorm_trajectories 进行赋值
+                        # Write results into denorm_trajectories.
                         denorm_trajectories[i, j, 0] = Ax * norm_px + Bx
                         denorm_trajectories[i, j, 1] = Ay * norm_py + By
             # --------------------------------------------------------------------
@@ -698,9 +604,9 @@ class FlowMatchingInference:
                 # --------------------------------------------------------------------
 
             elif DENORM_METHOD == 'SimilarityWithEndpointCorrection':
-                epsilon = 1e-7  # 用于比较浮点数是否接近零的阈值
+                epsilon = 1e-7  # Threshold for near-zero floating-point comparisons.
 
-                for i in range(batch_size):  # 遍历批次中的每条轨迹
+                for i in range(batch_size):
                     traj_norm = trajectories_reshaped[i]
 
                     if traj_norm.shape[0] == 0: continue
@@ -711,7 +617,7 @@ class FlowMatchingInference:
                     origin_target = condition_sample_lonlat[i, 0]
                     dest_target = condition_sample_lonlat[i, 1]
 
-                    # --- 步骤 1: 进行最优的初始变换 (完整的相似变换) ---
+                    # --- Step 1: apply the initial full similarity transform. ---
                     V_norm = dest_norm - origin_norm
                     V_target = dest_target - origin_target
 
@@ -731,10 +637,10 @@ class FlowMatchingInference:
                         sin_theta = np.sin(theta)
                     else:
                         if len_target > epsilon:
-                            print(f"警告 (样本 {i}, SimilarityWithEndpointCorrection): "
-                                  f"归一化轨迹O/D重合，但目标O/D不重合。轨迹将塌缩至目标起点。")
+                            print(f"Warning (sample {i}, SimilarityWithEndpointCorrection): "
+                                  f"normalized O/D points coincide, but target O/D points do not. The trajectory will collapse to the target origin.")
 
-                    # 计算初始变换后的轨迹
+                    # Compute the trajectory after the initial transform.
                     initial_denorm_traj = np.zeros_like(traj_norm)
                     for j in range(traj_length):
                         point_norm = traj_norm[j]
@@ -747,7 +653,7 @@ class FlowMatchingInference:
                         initial_denorm_traj[j, 0] = p_rotated_x + origin_target[0]
                         initial_denorm_traj[j, 1] = p_rotated_y + origin_target[1]
 
-                    # --- 步骤 2: 进行强制端点修正 (消除浮点误差，保证100%对齐) ---
+                    # --- Step 2: enforce endpoint correction to eliminate floating-point drift. ---
                     if traj_length > 1:
                         current_start = initial_denorm_traj[0]
                         current_end = initial_denorm_traj[-1]
@@ -755,22 +661,22 @@ class FlowMatchingInference:
                         start_error_vector = origin_target - current_start
                         end_error_vector = dest_target - current_end
 
-                        # 创建从1到0的线性插值权重
+                        # Create linearly interpolated weights from 1 to 0.
                         w = np.linspace(1, 0, traj_length)
 
-                        # 将误差向量线性地分配到轨迹上的所有点
+                        # Distribute the endpoint error vectors across the full trajectory.
                         # correction[j] = w[j] * start_error_vector + (1 - w[j]) * end_error_vector
                         correction = w[:, np.newaxis] * start_error_vector + (1 - w)[:, np.newaxis] * end_error_vector
 
-                        # 将修正量加到初始变换后的轨迹上
+                        # Apply the correction to the initial transformed trajectory.
                         denorm_trajectories[i] = initial_denorm_traj + correction
-                    else:  # 如果轨迹只有一个点，直接使用初始变换的结果
+                    else:  # For single-point trajectories, keep the initial transform result.
                         denorm_trajectories[i] = initial_denorm_traj
 
-            elif DENORM_METHOD == 'HybridSimilarity':  # 新增的混合策略（高级）方法
+            elif DENORM_METHOD == 'HybridSimilarity':  # Higher-fidelity fallback strategy.
                 epsilon = 1e-7
-                # 关键参数：旋转阈值。如果计算出的旋转角度绝对值小于此值，则忽略旋转。
-                # 这个值可能需要根据您的数据特性进行微调。5.0度是一个合理的初始值。
+                # Ignore rotation when the angle stays below this threshold.
+                # 5 degrees is a reasonable starting point and can be tuned per dataset.
                 rotation_threshold_degrees = 5.0
                 rotation_threshold_rad = np.deg2rad(rotation_threshold_degrees)
 
@@ -785,7 +691,7 @@ class FlowMatchingInference:
                     origin_target = condition_sample_lonlat[i, 0]
                     dest_target = condition_sample_lonlat[i, 1]
 
-                    # --- 步骤 1: 计算相似变换所需的缩放因子 s 和旋转角度 theta ---
+                    # --- Step 1: compute the scale factor s and rotation angle theta. ---
                     V_norm = dest_norm - origin_norm
                     V_target = dest_target - origin_target
 
@@ -800,43 +706,39 @@ class FlowMatchingInference:
                         angle_norm = np.arctan2(V_norm[1], V_norm[0])
                         angle_target = np.arctan2(V_target[1], V_target[0])
                         theta = angle_target - angle_norm
-                    else:  # 归一化轨迹的O/D点重合
+                    else:  # The normalized O/D points coincide.
                         if len_target > epsilon:
                             print(
-                                f"警告 (样本 {i}, HybridSimilarity): 归一化轨迹O/D重合，但目标O/D不重合。轨迹将塌缩至目标起点。")
+                                f"Warning (sample {i}, HybridSimilarity): normalized O/D points coincide, but target O/D points do not. The trajectory will collapse to the target origin.")
 
-                    # --- 步骤 2: 根据阈值判断是否执行旋转 ---
+                    # --- Step 2: decide whether the rotation should be applied. ---
                     if abs(theta) < rotation_threshold_rad:
-                        # 角度过小，视为噪声，不执行旋转
-                        # if len_norm > epsilon: # 仅用于调试，可移除
-                        #     print(f"调试 (样本 {i}): 旋转角 {np.rad2deg(theta):.2f}° < 阈值 {rotation_threshold_degrees}°，已忽略旋转。")
+                        # Treat very small angles as noise and skip rotation.
                         cos_theta = 1.0
                         sin_theta = 0.0
                     else:
-                        # 角度显著，执行旋转
-                        # if len_norm > epsilon: # 仅用于调试，可移除
-                        #     print(f"调试 (样本 {i}): 旋转角 {np.rad2deg(theta):.2f}° >= 阈值 {rotation_threshold_degrees}°，执行旋转。")
+                        # Apply rotation when the angle is significant.
                         cos_theta = np.cos(theta)
                         sin_theta = np.sin(theta)
 
-                    # --- 步骤 3: 执行初始变换（统一缩放 + 条件性旋转 + 平移）---
+                    # --- Step 3: apply uniform scaling, optional rotation, and translation. ---
                     initial_denorm_traj = np.zeros_like(traj_norm)
                     for j in range(traj_length):
                         point_norm = traj_norm[j]
-                        # 平移至原点
+                        # Translate to the origin.
                         p_centered_x = point_norm[0] - origin_norm[0]
                         p_centered_y = point_norm[1] - origin_norm[1]
-                        # 缩放
+                        # Scale.
                         p_scaled_x = p_centered_x * scale_s
                         p_scaled_y = p_centered_y * scale_s
-                        # (条件性)旋转
+                        # Rotate when required.
                         p_rotated_x = p_scaled_x * cos_theta - p_scaled_y * sin_theta
                         p_rotated_y = p_scaled_x * sin_theta + p_scaled_y * cos_theta
-                        # 平移至目标起点
+                        # Translate to the target origin.
                         initial_denorm_traj[j, 0] = p_rotated_x + origin_target[0]
                         initial_denorm_traj[j, 1] = p_rotated_y + origin_target[1]
 
-                    # --- 步骤 4: 应用强制端点修正，保证100%对齐 ---
+                    # --- Step 4: enforce endpoint correction. ---
                     if traj_length > 1:
                         current_start = initial_denorm_traj[0]
                         current_end = initial_denorm_traj[-1]
@@ -844,21 +746,21 @@ class FlowMatchingInference:
                         start_error = origin_target - current_start
                         end_error = dest_target - current_end
 
-                        # 只有当误差不可忽略时才进行修正，以提高效率
+                        # Only correct when the residual error is non-negligible.
                         if np.linalg.norm(start_error) > epsilon or np.linalg.norm(end_error) > epsilon:
                             w = np.linspace(1, 0, traj_length)
                             correction = w[:, np.newaxis] * start_error + (1 - w)[:, np.newaxis] * end_error
                             denorm_trajectories[i] = initial_denorm_traj + correction
-                        else:  # 误差可忽略，无需修正
+                        else:  # Residual error is negligible; keep the initial result.
                             denorm_trajectories[i] = initial_denorm_traj
-                    else:  # 轨迹只有一个点
+                    else:  # Single-point trajectory.
                         denorm_trajectories[i] = initial_denorm_traj
 
-            elif DENORM_METHOD == 'MixStrategy':  # 新增的智能混合策略
+            elif DENORM_METHOD == 'MixStrategy':  # Adaptive blend between affine and similarity transforms.
                 epsilon = 1e-7
-                # 关键超参数：用于判断是否发生极端变形的各向异性比率阈值
+                # Threshold used to flag extreme anisotropic distortion.
                 anisotropy_threshold = 10.0
-                # 用于混合策略中 'HybridSimilarity' 部分的旋转阈值
+                # Rotation threshold reused by the HybridSimilarity branch.
                 rotation_threshold_degrees = 5.0
                 rotation_threshold_rad = np.deg2rad(rotation_threshold_degrees)
 
@@ -871,35 +773,33 @@ class FlowMatchingInference:
                     origin_target = condition_sample_lonlat[i, 0]
                     dest_target = condition_sample_lonlat[i, 1]
 
-                    # --- 步骤 1: 预计算 'Affine_ExplicitParams' 的缩放因子以评估风险 ---
+                    # --- Step 1: precompute affine scale factors to assess distortion risk. ---
                     norm_range_x = dest_norm[0] - origin_norm[0]
                     target_range_x = dest_target[0] - origin_target[0]
                     norm_range_y = dest_norm[1] - origin_norm[1]
                     target_range_y = dest_target[1] - origin_target[1]
 
-                    # 计算缩放比例的绝对值，为避免除零，给分母加一个极小值
+                    # Compute absolute scale ratios with epsilon-protected denominators.
                     scale_x_abs = abs(target_range_x / (norm_range_x + epsilon)) if abs(
                         norm_range_x) > epsilon else float('inf')
                     scale_y_abs = abs(target_range_y / (norm_range_y + epsilon)) if abs(
                         norm_range_y) > epsilon else float('inf')
 
-                    # --- 步骤 2: 判断是否会发生严重扭曲 ---
+                    # --- Step 2: decide whether severe distortion is likely. ---
                     is_distorted = False
-                    # 如果一个轴的归一化范围为零但目标范围不为零，这是一个明确的扭曲信号
+                    # A zero normalized range with a non-zero target range is a clear distortion signal.
                     if (abs(norm_range_x) < epsilon and abs(target_range_x) >= epsilon) or \
                             (abs(norm_range_y) < epsilon and abs(target_range_y) >= epsilon):
                         is_distorted = True
-                    # 如果两个轴的缩放比例相差过大
+                    # Large scale-ratio mismatch between axes also indicates distortion.
                     elif min(scale_x_abs, scale_y_abs) > 0 and max(scale_x_abs, scale_y_abs) / min(scale_x_abs,
                                                                                                    scale_y_abs) > anisotropy_threshold:
                         is_distorted = True
 
-                    # --- 步骤 3: 根据判断结果选择并应用相应的方法 ---
+                    # --- Step 3: select and apply the appropriate transform. ---
                     if is_distorted:
-                        # **执行备用策略: 'HybridSimilarity'**
-                        # (此方法能保持形状，避免扭曲)
-                        # if i % 10 == 0: # 可选的调试信息
-                        #     print(f"调试 (样本 {i}): 检测到高风险扭曲，切换到 HybridSimilarity 方法。")
+                        # Fallback to HybridSimilarity when distortion risk is high.
+                        # This preserves shape better under extreme geometry changes.
 
                         V_norm = dest_norm - origin_norm
                         V_target = dest_target - origin_target
@@ -942,12 +842,10 @@ class FlowMatchingInference:
                             denorm_trajectories[i] = initial_denorm_traj
 
                     else:
-                        # **执行默认策略: 'Affine_ExplicitParams'**
-                        # (因为风险低，且您认为它在一般情况下表现更好)
-                        # if i % 10 == 0: # 可选的调试信息
-                        #     print(f"调试 (样本 {i}): 低风险，使用 Affine_ExplicitParams 方法。")
+                        # Use Affine_ExplicitParams when distortion risk is low.
+                        # This is the default path for the typical low-risk case.
 
-                        # 直接使用预计算的范围来计算Ax, Bx, Ay, By
+                        # Reuse the precomputed ranges to derive Ax, Bx, Ay, and By.
                         if abs(norm_range_x) < epsilon:
                             Ax, Bx = 0.0, origin_target[0]
                         else:
@@ -971,114 +869,6 @@ class FlowMatchingInference:
             denormalized_list.append(denorm_trajectories.reshape(batch_size, traj_length * 2))
 
         return denormalized_list
-
-    # def denormalize_trajectories_v1(self, trajectory_list, onehoted_condition_sample, dataset):
-    #     """
-    #     Denormalize trajectories using mapping_dict for visualization.
-    #
-    #     Args:
-    #         trajectory_list: List of trajectory tensors to denormalize
-    #         onehoted_condition_sample: One-hot encoded condition samples
-    #         dataset: Dataset containing mapping dictionaries
-    #
-    #     Returns:
-    #         denormalized_list: List of denormalized trajectories with preserved shapes
-    #     """
-    #     denormalized_list = []
-    #
-    #     # Get mappings from dataset
-    #     onehot_od_dict = dataset.onehot_od_dict
-    #     grid_mapping_dict = dataset.grid_mapping_dict
-    #
-    #     # Convert one-hot condition samples to coordinates
-    #     condition_sample = np.zeros((len(onehoted_condition_sample), 2))
-    #     for i in range(len(condition_sample)):
-    #         condition_sample[i] = onehot_od_dict[np.where(onehoted_condition_sample[i] == 1)[0][0]]
-    #
-    #     # Convert to grid coordinates
-    #     for i in range(condition_sample.shape[0]):
-    #         for j in range(condition_sample.shape[1]):
-    #             condition_sample[i][j] = grid_mapping_dict[condition_sample[i][j]].astype(int)
-    #
-    #     # Convert grid coordinates to lat/lon points
-    #     condition_sample_lonlat = np.zeros((len(onehoted_condition_sample), 2, 2))
-    #     for i in range(condition_sample.shape[0]):
-    #         for j in range(condition_sample.shape[1]):
-    #             condition_sample_lonlat[i, j, :] = ju.to_meshpoint(int(condition_sample[i][j]), 0.5, 0.5)
-    #
-    #     for trajectories in trajectory_list:
-    #         # Reshape to (n_samples, M, 2) format
-    #         batch_size = trajectories.shape[0]
-    #         trajectories_reshaped = trajectories.reshape(batch_size, self.M, 2)
-    #
-    #         # Initialize output array
-    #         denorm_trajectories = np.zeros_like(trajectories_reshaped)
-    #
-    #         # Process each trajectory in the batch
-    #         for i in range(batch_size):
-    #             # Get normalized trajectory
-    #             traj = trajectories_reshaped[i].copy()
-    #
-    #             # Get origin and destination points
-    #             origin_norm = traj[0]  # First point
-    #             dest_norm = traj[-1]  # Last point
-    #
-    #             # Get target coordinates
-    #             origin_target = condition_sample_lonlat[i, 0]
-    #             dest_target = condition_sample_lonlat[i, 1]
-    #
-    #             # Calculate vectors
-    #             norm_vector = dest_norm - origin_norm
-    #             target_vector = dest_target - origin_target
-    #
-    #             # Calculate length of vectors
-    #             norm_length = np.linalg.norm(norm_vector)
-    #             target_length = np.linalg.norm(target_vector)
-    #
-    #             # Handle zero-length cases
-    #             epsilon = 1e-6
-    #             if norm_length < epsilon:
-    #                 # If normalized trajectory is just a point, place it at the midpoint
-    #                 for j in range(self.M):
-    #                     ratio = j / (self.M - 1) if self.M > 1 else 0.5
-    #                     denorm_trajectories[i, j] = origin_target + ratio * target_vector
-    #                 continue
-    #
-    #             # Calculate uniform scale to preserve shape
-    #             scale = target_length / norm_length
-    #
-    #             # Calculate relative positions for each point along the trajectory
-    #             for j in range(self.M):
-    #                 # Calculate relative vector from origin
-    #                 rel_vector = traj[j] - origin_norm
-    #
-    #                 # Project this vector onto the direction of the normalized path
-    #                 if norm_length > epsilon:
-    #                     norm_dir = norm_vector / norm_length
-    #                     proj_length = np.dot(rel_vector, norm_dir)
-    #                     # Projection along the path direction
-    #                     proj_vector = proj_length * norm_dir
-    #                     # Perpendicular component (preserves shape)
-    #                     perp_vector = rel_vector - proj_vector
-    #
-    #                     # Scale projection component to match target length
-    #                     if target_length > epsilon:
-    #                         target_dir = target_vector / target_length
-    #                         scaled_proj = (proj_length / norm_length) * target_length * target_dir
-    #                         # Apply scaled projection + perpendicular component (preserves shape)
-    #                         denorm_trajectories[i, j] = origin_target + scaled_proj + scale * perp_vector
-    #                     else:
-    #                         # If target is a point, use simple interpolation
-    #                         denorm_trajectories[i, j] = origin_target
-    #                 else:
-    #                     # If original path is a point, interpolate
-    #                     ratio = j / (self.M - 1) if self.M > 1 else 0.5
-    #                     denorm_trajectories[i, j] = origin_target + ratio * target_vector
-    #
-    #         # Reshape back to original format
-    #         denormalized_list.append(denorm_trajectories.reshape(batch_size, self.M * 2))
-    #
-    #     return denormalized_list
 
     def evaluate(self):
         """

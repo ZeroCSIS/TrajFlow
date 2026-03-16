@@ -5,7 +5,7 @@ project:
   seed: 42
 
 data:
-  dataset_type: bwtraj
+  dataset_type: didi
   region: XiAn
   dataset_folder: ""
   sample_count: -1
@@ -17,8 +17,6 @@ data:
   norm1by1: true
   od_finer: true
   geohash: false
-  AOITYPE: false
-  AOIEMB: false
 
 flow_matching:
   enabled: true

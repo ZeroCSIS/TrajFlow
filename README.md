@@ -1,6 +1,6 @@
 # TrajFlow: nationwide Pseudo GPS Trajectory Generation with Flow Matching Models
 
-Official implementation of **TrajFlow**.
+This repository is the  implementation of paper **TrajFlow: nationwide Pseudo GPS Trajectory Generation with Flow Matching Models**.
 
 ![TrajFlow Motivation](assets/Fig1.png)
 

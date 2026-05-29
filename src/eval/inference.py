@@ -354,7 +354,7 @@ class FlowMatchingInference:
 
         for i in range(condition_sample.shape[0]):
             for j in range(condition_sample.shape[1]):
-                condition_sample[i][j] = grid_mapping_dict[onehoted_condition_sample[i][j]].astype(int)
+                condition_sample[i][j] = int(grid_mapping_dict[onehoted_condition_sample[i][j]])
 
         #     raise ValueError("Unknown encoding format. Use 'onehot' or 'embedding'.")
 

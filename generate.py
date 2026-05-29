@@ -242,6 +242,10 @@ def generate_trajectories(model, all_gt_data, all_head, lengths, traj_mean, traj
             od_finer_params_sol = None
             od_finer_params_gt = None
 
+        if SAVE_RAW_TRAJS and config['data']['norm1by1']:
+            raw_sol_np = np.reshape(sol_np, (sol_np.shape[0], -1))
+            raw_ground_truth_np = np.reshape(ground_truth_np, (ground_truth_np.shape[0], -1))
+
         # Denormalize if needed
         if (config['condition']['enabled']
                 and config['data']['norm1by1']
@@ -250,9 +254,6 @@ def generate_trajectories(model, all_gt_data, all_head, lengths, traj_mean, traj
             print(f"Denormalizing data for batch {batch_idx + 1}...")
 
             if od_finer_enabled:
-                if SAVE_RAW_TRAJS:
-                    raw_sol_np = np.reshape(sol_np, (sol_np.shape[0], -1))
-                    raw_ground_truth_np = np.reshape(ground_truth_np, (ground_truth_np.shape[0], -1))
                 sol_np = inference.denormalize_trajectories([sol_np], condition_sample_np,
                                                             dataset, od_finer_params=od_finer_params_sol)[0]
                 ground_truth_np = inference.denormalize_trajectories([ground_truth_np], condition_sample_np,

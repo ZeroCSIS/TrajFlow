@@ -16,10 +16,14 @@ TrajFlow is a flow-matching based framework for pseudo GPS trajectory generation
 - Open-source support is provided for **DiDi Chengdu/XiAn data** to verify that the pipeline works on public-style data.
 - This repository does **not** ship raw trajectories, private data, or model checkpoints.
 - We do **not** redistribute DiDi datasets. Please obtain data from official/authorized channels under your own compliance responsibility.
+- A fully synthetic toy dataset is included only to demonstrate the expected processed data format and support smoke tests.
 
 Expected local layout for testing:
+- `./data/toy_trajflow`
 - `./data/DiDiTaxi_Chengdu_traj`
 - `./data/DiDiTaxi_XiAn_traj`
+
+See `data/README.md` for the processed file schema.
 
 ## Setup
 ```bash
@@ -33,6 +37,12 @@ Notes:
 - This repository does not vendor a local `flow_matching/` copy.
 
 ## Usage
+
+Toy-data smoke test:
+```bash
+python data/make_toy_data.py
+python train.py --config ./src/config/config_toy.yaml
+```
 
 Training:
 ```bash

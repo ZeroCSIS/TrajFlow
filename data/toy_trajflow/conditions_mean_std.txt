@@ -1,0 +1,10 @@
+total_dis_mean: 446.1591491699
+total_dis_std: 36.7664451599
+total_time_mean: 6533.2797851562
+total_time_std: 2399.5947265625
+total_len_mean: 120.0000000000
+total_len_std: 1.0000000000
+avg_dis_mean: 3.7179927826
+avg_dis_std: 0.3063870370
+avg_speed_mean: 0.0809490457
+avg_speed_std: 0.0380156338

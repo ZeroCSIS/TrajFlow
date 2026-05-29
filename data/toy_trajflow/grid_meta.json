@@ -1,0 +1,5 @@
+{
+  "encoding": "geohash",
+  "geohash_precision": 3,
+  "note": "Synthetic geohash cells generated from dummy coordinates."
+}

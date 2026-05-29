@@ -1,0 +1,5 @@
+Synthetic TrajFlow toy dataset
+samples: 1000
+trajectory_length: 120
+source: fully synthetic procedural curves; no BW or DiDi data used
+condition_columns: departure, total_dis_z, total_time_z, total_len_z, avg_dis_z, avg_speed_z, origin_id, destination_id, transport_mode

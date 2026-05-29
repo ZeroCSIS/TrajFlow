@@ -13,10 +13,8 @@ TrajFlow is a flow-matching based framework for pseudo GPS trajectory generation
 ## Data Availability
 - This repository provides the training and inference pipeline for TrajFlow.
 - The main paper conclusions are validated on **BW** data, which is commercial/private and not open-sourced here.
-- Open-source support is provided for **DiDi Chengdu/XiAn data** to verify that the pipeline works on public-style data.
-- This repository does **not** ship raw trajectories, private data, or model checkpoints.
-- We do **not** redistribute DiDi datasets. Please obtain data from official/authorized channels under your own compliance responsibility.
-- A fully synthetic toy dataset is included only to demonstrate the expected processed data format and support smoke tests.
+- We do **not** redistribute DiDi datasets due to policy restrictions. Please obtain data from official/authorized channels under your own compliance responsibility.
+- A toy synthetic toy dataset is included only to demonstrate the expected processed data format and support smoke tests.
 
 Expected local layout for testing:
  - `./data/toy_data`

@@ -1,9 +1,6 @@
 # Data Format
 
-This repository does not redistribute Blogwatcher (BW), DiDi, or any other
-third-party real trajectory data. The included `toy_data/` folder is fully
-synthetic and is provided only to document the processed data format expected by
-the released code.
+Due to policy restrictions, we could not distribute real dataset. The included `toy_data/` folder is fully synthetic and is provided only to document the processed data format expected by the released code.
 
 ## Included Toy Data
 
@@ -88,17 +85,10 @@ Transport mode ids follow the preprocessing convention:
 
 ## Using Authorized Real Data
 
-If you have authorized access to DiDi, BW, or your own trajectory data, convert
+If you have authorized access to your own trajectory data, convert
 it into the same processed format above and point the config to that folder:
 
 ```yaml
 data:
   dataset_folder: data/your_processed_dataset
 ```
-
-For the public DiDi-style configs, the expected local folders are:
-
-- `data/DiDiTaxi_Chengdu_traj`
-- `data/DiDiTaxi_XiAn_traj`
-
-Those folders are intentionally not distributed by this repository.

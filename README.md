@@ -56,8 +56,6 @@ python generate.py \
   --checkpoint ./outputs/models/run_YYYYMMDD_HHMMSS/best_model.pt
 ```
 
-- Evaluation scripts are intentionally omitted from the open-source release to keep the repository focused on the core training/generation pipeline.
-
 ## License
 Unless otherwise noted, the original code in this repository is released under **CC BY-NC 4.0** (`LICENSE`).
 

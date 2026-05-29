@@ -206,7 +206,7 @@ def build_dataset(output_dir: Path, coeff_path: Path, sample_count: int, length:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate the synthetic TrajFlow toy dataset.")
-    parser.add_argument("--output-dir", type=Path, default=Path("data/toy_trajflow"))
+    parser.add_argument("--output-dir", type=Path, default=Path("data/toy_data"))
     parser.add_argument("--coeff-path", type=Path, default=Path("data/processed_coeffs_Toy_rdp_k_10.npy"))
     parser.add_argument("--sample-count", type=int, default=1000)
     parser.add_argument("--length", type=int, default=120)

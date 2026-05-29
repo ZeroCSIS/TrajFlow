@@ -1,7 +1,7 @@
 # Data Format
 
 This repository does not redistribute Blogwatcher (BW), DiDi, or any other
-third-party real trajectory data. The included `toy_trajflow/` folder is fully
+third-party real trajectory data. The included `toy_data/` folder is fully
 synthetic and is provided only to document the processed data format expected by
 the released code.
 
@@ -15,12 +15,12 @@ python data/make_toy_data.py
 
 The default output is:
 
-- `data/toy_trajflow/traj_segments.pkl`
-- `data/toy_trajflow/conditions.pkl`
-- `data/toy_trajflow/mesh_mapping_dict.pkl`
-- `data/toy_trajflow/traj_mean_std.txt`
-- `data/toy_trajflow/conditions_mean_std.txt`
-- `data/toy_trajflow/grid_meta.json`
+- `data/toy_data/traj_segments.pkl`
+- `data/toy_data/conditions.pkl`
+- `data/toy_data/mesh_mapping_dict.pkl`
+- `data/toy_data/traj_mean_std.txt`
+- `data/toy_data/conditions_mean_std.txt`
+- `data/toy_data/grid_meta.json`
 - `data/processed_coeffs_Toy_rdp_k_10.npy`
 
 These files are created from procedural curves in a dummy coordinate space.

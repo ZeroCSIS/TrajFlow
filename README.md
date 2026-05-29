@@ -19,7 +19,7 @@ TrajFlow is a flow-matching based framework for pseudo GPS trajectory generation
 - A fully synthetic toy dataset is included only to demonstrate the expected processed data format and support smoke tests.
 
 Expected local layout for testing:
-- `./data/toy_trajflow`
+ - `./data/toy_data`
 - `./data/DiDiTaxi_Chengdu_traj`
 - `./data/DiDiTaxi_XiAn_traj`
 

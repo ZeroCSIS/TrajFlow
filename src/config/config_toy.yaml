@@ -8,7 +8,7 @@ project:
 data:
   dataset_type: didi
   region: Toy
-  dataset_folder: data/toy_trajflow
+  dataset_folder: data/toy_data
   sample_count: -1
   trajectory_length: 120
   batch_size: 64

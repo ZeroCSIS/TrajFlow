@@ -12,8 +12,8 @@ venv/
 /data/*
 !/data/README.md
 !/data/make_toy_data.py
-!/data/toy_trajflow/
-!/data/toy_trajflow/**
+!/data/toy_data/
+!/data/toy_data/**
 outputs/
 outputs_*/
 generate_results/
@@ -27,7 +27,7 @@ analysis_outputs/
 *.pkl
 *.npy
 *.zip
-!/data/toy_trajflow/*.pkl
+!/data/toy_data/*.pkl
 !/data/processed_coeffs_Toy_rdp_k_10.npy
 
 # IDE

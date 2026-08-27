@@ -1,11 +1,12 @@
 import os
-import torch
-import numpy as np
-from torch.utils.data import DataLoader
-from src.models.wrappers import WrappedModel
-from src.utils.visualization import visualize_trajectories, visualize_density_comparison
+
 import jismesh.utils as ju
-import math
+import numpy as np
+import torch
+from torch.utils.data import DataLoader
+
+from src.models.wrappers import WrappedModel
+from src.utils.visualization import visualize_density_comparison, visualize_trajectories
 
 _BASE32_ALPHABET = '0123456789bcdefghjkmnpqrstuvwxyz'
 _BASE32_MAP = {c: i for i, c in enumerate(_BASE32_ALPHABET)}
@@ -60,6 +61,23 @@ def _geohash_point_from_multiplier(cell_id: int, lat_mult: float, lon_mult: floa
     lat = lat_range[0] + lat_mult * (lat_range[1] - lat_range[0])
     lon = lon_range[0] + lon_mult * (lon_range[1] - lon_range[0])
     return np.array([lat, lon])
+
+
+def _cartesian_grid_point(cell_id: int, x_mult: float, y_mult: float,
+                          metadata: dict) -> np.ndarray:
+    """Decode an x-major flat cell id without treating it as a geo mesh."""
+    width = int(metadata.get('width', 200))
+    height = int(metadata.get('height', 200))
+    coordinate_min = float(metadata.get('coordinate_min', 1))
+    if cell_id < 0 or cell_id >= width * height:
+        raise ValueError(f"Cartesian cell id {cell_id} is outside [0, {width * height})")
+    x_index, y_index = divmod(cell_id, height)
+    return np.array([
+        coordinate_min + x_index + (float(x_mult) - 0.5),
+        coordinate_min + y_index + (float(y_mult) - 0.5),
+    ])
+
+
 class ConditionedVelocityModelWrapper(torch.nn.Module):
     """Wrapper around velocity model to inject month condition during inference.
 
@@ -303,11 +321,12 @@ class FlowMatchingInference:
                 mapping_dict=self.dataset.grid_mapping_dict,
                 norm1by1_viz=self.config['visualization']['norm1by12origialvis'])
 
-        # Create time grid for numerical integration
-        time_grid = torch.linspace(0, 1, n_steps).to(self.device)
-
-        # Set step size based on number of steps
-        step_size = 1.0 / (n_steps - 1)
+        if n_steps is None or n_steps <= 0:
+            raise ValueError("n_steps must be a positive integer")
+        # n_steps denotes Euler updates. The previous implementation silently
+        # performed n_steps - 1 updates for every configured sampler.
+        time_grid = torch.arange(n_steps, device=self.device, dtype=torch.float32) / n_steps
+        step_size = 1.0 / n_steps
 
         # Sample using the wrapped model
         # MEMORY OPTIMIZATION: Only store initial state, not all intermediate steps
@@ -315,7 +334,7 @@ class FlowMatchingInference:
 
         # Numerical integration
         if method == 'em':  # Euler-Maruyama method
-            for t_idx in range(n_steps - 1):
+            for t_idx in range(n_steps):
                 t = time_grid[t_idx] * torch.ones(n_samples, 1, device=self.device)
                 # Get velocity from the model
                 with torch.no_grad():  # Disable gradient computation for memory efficiency
@@ -395,6 +414,9 @@ class FlowMatchingInference:
                 if grid_encoding == 'geohash':
                     condition_sample_lonlat[i, j, :] = _geohash_point_from_multiplier(
                         cell_value, lat_mult[i][j], lon_mult[i][j], geohash_precision)
+                elif grid_encoding == 'cartesian_grid':
+                    condition_sample_lonlat[i, j, :] = _cartesian_grid_point(
+                        cell_value, lat_mult[i][j], lon_mult[i][j], grid_meta)
                 else:
                     condition_sample_lonlat[i, j, :] = ju.to_meshpoint(
                         cell_value, lat_mult[i][j], lon_mult[i][j])
@@ -883,18 +905,20 @@ class FlowMatchingInference:
         os.makedirs(results_dir, exist_ok=True)
 
         # Sampling parameters from config
-        n_samples = self.config['inference']['n_samples']
-        n_steps = self.config['inference']['sampling_steps']
-        method = self.config['inference']['sampling_method']
+        inference_config = self.config['inference']
+        n_samples = inference_config.get('n_samples', inference_config.get('num_samples', 200))
+        n_steps = inference_config.get('sampling_steps', inference_config.get('num_steps', 10))
+        method = inference_config['sampling_method']
 
         # Generate samples
         print(f"Generating {n_samples} samples using {method} method with {n_steps} steps...")
         sol = self.sample(n_samples, n_steps, method)
 
         # Get ground truth samples
-        ground_truth = next(iter(self.dataloader))[:n_samples].to(self.device)
-        if isinstance(ground_truth, tuple) and self.conditional:
-            ground_truth = ground_truth[0]  # Only use data, not condition
+        ground_truth_batch = next(iter(self.dataloader))
+        if isinstance(ground_truth_batch, (tuple, list)):
+            ground_truth_batch = ground_truth_batch[0]
+        ground_truth = ground_truth_batch[:n_samples].to(self.device)
 
         # Convert to numpy for visualization
         sol_np = [s.detach().cpu().numpy() for s in sol]
@@ -902,7 +926,7 @@ class FlowMatchingInference:
 
         # Reconstrut normlized trajectories based on mapping_dict
         if (self.config['visualization']['norm1by12origialvis'] and
-                self.dataset.mapping_dict is not None):
+                getattr(self.dataset, 'mapping_dict', None) is not None):
             print("Denormalizing data for visualization...")
             sol_np = self.denormalize_trajectories(sol_np)
             ground_truth_np = self.denormalize_trajectories([ground_truth_np])[0]

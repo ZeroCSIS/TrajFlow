@@ -1,25 +1,29 @@
-import sys
-import os
-import random
 import argparse
-import torch
+import json
+import os
+import sys
+from datetime import datetime
+
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-from tqdm import tqdm
+import torch
 import yaml
 from torch.utils.data import DataLoader
-from datetime import datetime
-from data_utils import PrepareDataset
-from src.models.networks import ConditionalVelocityModel, MLP, CNN, TransformerVelocity, BiLSTMVelocity
+
+from src.data.transforms import para2point_batch
+from src.eval.metrics import compute_baseline_metrics
+from src.models.networks import (
+    CNN,
+    MLP,
+    BiLSTMVelocity,
+    ConditionalVelocityModel,
+    TransformerVelocity,
+)
 from src.models.trajectory_gan import ConditionalTrajectoryGAN, TrajectoryGAN
 from src.models.trajectory_vae import ConditionalTrajectoryVAE, TrajectoryVAE
-from src.data.transforms import para2point, para2point_batch
-
-from src.utils.visualization import (
-    visualize_density_comparison,
-    visualize_trajectories
-)
+from src.utils.reproducibility import seed_everything
+from src.utils.visualization import visualize_density_comparison, visualize_trajectories
 
 # Add project root to path
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -125,7 +129,7 @@ def generate_trajectories(model, all_gt_data, all_head, lengths, traj_mean, traj
     raw_gt_trajs = []  # For storing raw ground truth trajectories
 
     indices = list(range(len(dataset)))
-    random_state = np.random.RandomState(42)
+    random_state = np.random.RandomState(int(config.get('project', {}).get('seed', 42)))
     selected_indices = random_state.choice(indices, size=min(generate_num, len(indices)), replace=False)
     dataloader = DataLoader(dataset, batch_size=batch_size, sampler=selected_indices)
 
@@ -165,17 +169,18 @@ def generate_trajectories(model, all_gt_data, all_head, lengths, traj_mean, traj
             # Calculate correct indices for this batch
             start_idx = batch_idx * batch_size
             end_idx = min(start_idx + current_batch_size, len(indices))
-            batch_indices = indices[start_idx:end_idx]
+            batch_indices = selected_indices[start_idx:end_idx].tolist()
             all_indices.extend(batch_indices)
 
             # Extract raw ground truth for these indices
             for idx in batch_indices:
                 if idx < len(all_gt_data):
-                    raw_traj = all_gt_data[selected_indices[idx]]
+                    raw_traj = np.array(all_gt_data[idx], copy=True)
                     if len(raw_traj) != M:
                         raw_traj = resample_trajectory(raw_traj, config['data']['trajectory_length'])
-                    for k in range(2):
-                        raw_traj[:, k] = raw_traj[:, k] * traj_std[k] + traj_mean[k]
+                    if not dataset.grid_metadata.get('coordinates_are_raw', False):
+                        for k in range(2):
+                            raw_traj[:, k] = raw_traj[:, k] * traj_std[k] + traj_mean[k]
                     raw_gt_trajs.append(raw_traj)
 
             print(
@@ -288,7 +293,7 @@ def generate_trajectories(model, all_gt_data, all_head, lengths, traj_mean, traj
     if config['condition']['enabled'] and all_indices:
         for idx in all_indices:
             if idx < len(all_head):
-                total_cond_info.append(all_head[selected_indices[idx]])
+                total_cond_info.append(all_head[idx])
 
     # Convert final sample (last timestep) trajectories to the expected format
     total_gen_trajs = [x.reshape(traj_length, 2) for x in all_sol_np]
@@ -354,6 +359,20 @@ def generate_trajectories(model, all_gt_data, all_head, lengths, traj_mean, traj
             save_dir=save_dir,
             traj_type="ground_truth_before_denormalization"
         )
+
+    evaluation_config = config.get('evaluation', {})
+    if evaluation_config.get('enabled', False):
+        metrics = compute_baseline_metrics(
+            np.asarray(total_gen_trajs),
+            np.asarray(total_gt_trajs),
+            grid_metadata=dataset.grid_metadata,
+            max_pairs=int(evaluation_config.get('max_curve_pairs', 200)),
+        )
+        metrics_path = os.path.join(save_dir, 'baseline_metrics.json')
+        with open(metrics_path, 'w', encoding='utf-8') as stream:
+            json.dump(metrics, stream, ensure_ascii=False, indent=2)
+            stream.write('\n')
+        print(f"Baseline metrics saved to {metrics_path}")
 
     return total_gen_trajs, total_gt_trajs, total_cond_info
 
@@ -532,6 +551,12 @@ def main():
         config = config_dict
         model_dir = os.path.dirname(args.config)
 
+    seed = int(config.get('project', {}).get('seed', 42))
+    seed_everything(
+        seed,
+        deterministic=bool(config.get('project', {}).get('deterministic', True)),
+    )
+
     global device
     configured_device = config.get("training", {}).get("device", "cuda:0")
     device = resolve_device(args.device or configured_device)
@@ -596,33 +621,16 @@ def main():
     with open(os.path.join(result_dir, 'config.yaml'), 'w') as f:
         yaml.dump(config_dict, f)
 
-    # Load data from open-source public regions only.
-    PROJ_PATH = '.'
-    FOLDERS = {
-        'Chengdu': f'{PROJ_PATH}/data/DiDiTaxi_Chengdu_traj',
-        'XiAn': f'{PROJ_PATH}/data/DiDiTaxi_XiAn_traj',
-    }
-    custom_folder = config['data'].get('dataset_folder', '')
-    if custom_folder:
-        folder = custom_folder if os.path.isabs(custom_folder) else os.path.join(PROJ_PATH, custom_folder)
-    else:
-        region = config['data']['region']
-        if region not in FOLDERS:
-            raise ValueError(f"Unsupported open-source region: {region}. Use Chengdu or XiAn.")
-        folder = FOLDERS[region]
-        if not os.path.exists(folder):
-            import glob
-
-            fallback_candidates = glob.glob(f"{folder}*")
-            fallback_candidates = [p for p in fallback_candidates if os.path.isdir(p)]
-            if fallback_candidates:
-                folder = sorted(fallback_candidates)[0]
-    (all_head, traj_mean, traj_std, lengths,
-     cond_mean, cond_std, all_gt_data, grid_mapping_dict) = PrepareDataset.loadExistingData(
-        folder, resample_length=config['data']['trajectory_length'])
-
-    # Create dataset (for condition dimension info)
-    dataset = FlowMatchingDataset(config_dict, mode='eval')
+    # Evaluation uses the test split selected by FlowMatchingDataset. Reusing
+    # the dataset-owned arrays prevents accidental indexing into the full file.
+    dataset = FlowMatchingDataset(config_dict, mode='test')
+    all_head = dataset.all_head
+    traj_mean = dataset.traj_mean
+    traj_std = dataset.traj_std
+    lengths = dataset.lengths
+    cond_mean = dataset.cond_mean
+    cond_std = dataset.cond_std
+    all_gt_data = getattr(dataset, 'traj_segments_before_stdize', dataset.traj_segments)
 
     # Create model
     input_dim = config['data']['trajectory_length']*2  # Trajectory coordinate dimension
@@ -712,6 +720,14 @@ def main():
         model.to(device)
         model.eval()
         print("Flow matching model loaded successfully")
+
+    if config.get('training', {}).get('data_parallel', False):
+        if device.type == 'cuda' and torch.cuda.device_count() > 1:
+            model = torch.nn.DataParallel(model).to(device)
+            model.eval()
+            print(f"Using DataParallel across {torch.cuda.device_count()} visible GPUs")
+        else:
+            print("data_parallel requested, but fewer than two CUDA devices are visible")
 
     # Print memory usage information
     if torch.cuda.is_available():

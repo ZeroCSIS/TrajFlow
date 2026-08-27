@@ -77,6 +77,15 @@ def resolve_device(device_str):
     return torch.device("cpu")
 
 
+def model_input_dim(config):
+    """Return the same trajectory representation width used by train.py."""
+    if config['data']['parametrized']:
+        points = config['data']['parametrized_M']
+    else:
+        points = config['data']['trajectory_length']
+    return int(points) * 2
+
+
 def find_config_by_timestamp(exp_savename_str):
     """Find config file by timestamp in folder name"""
     # Search standard output root used in the open-source package.
@@ -616,7 +625,11 @@ def main():
         # config_dict['inference']['num_steps'] = args.steps
         print(f"Using given sampling steps: {args.steps}")
     else:
-        print(f"Using config sampling steps: {config_dict['ddpm']['ddim_steps']}")
+        if config_dict.get('ddpm', {}).get('enabled', False):
+            configured_steps = config_dict['ddpm']['ddim_steps']
+        else:
+            configured_steps = config_dict['inference']['num_steps']
+        print(f"Using config sampling steps: {configured_steps}")
 
     with open(os.path.join(result_dir, 'config.yaml'), 'w') as f:
         yaml.dump(config_dict, f)
@@ -633,7 +646,7 @@ def main():
     all_gt_data = getattr(dataset, 'traj_segments_before_stdize', dataset.traj_segments)
 
     # Create model
-    input_dim = config['data']['trajectory_length']*2  # Trajectory coordinate dimension
+    input_dim = model_input_dim(config)
     hidden_dim = config['model']['hidden_dim']
     condition_dim = dataset.location_dim
 

@@ -4,6 +4,7 @@ import unittest
 
 import torch
 
+from generate import model_input_dim
 from src.eval.inference import FlowMatchingInference, _cartesian_grid_point
 
 
@@ -14,6 +15,16 @@ class ConstantVelocity(torch.nn.Module):
 
 
 class InferenceStepTest(unittest.TestCase):
+    def test_parameterized_model_input_matches_training_representation(self):
+        config = {
+            "data": {
+                "parametrized": True,
+                "parametrized_M": 10,
+                "trajectory_length": 120,
+            }
+        }
+        self.assertEqual(model_input_dim(config), 20)
+
     def test_configured_step_count_reaches_one_unit_of_constant_flow(self):
         inference = FlowMatchingInference.__new__(FlowMatchingInference)
         inference.config = {"data": {"od_finer": False}}

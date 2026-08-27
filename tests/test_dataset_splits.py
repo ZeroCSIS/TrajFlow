@@ -70,6 +70,59 @@ class DatasetSplitTest(unittest.TestCase):
                     dataset.conditions[:, 6:8].numpy(), dataset.all_head[:, 6:8]
                 )
 
+    def test_all_zero_parameter_cache_is_rebuilt(self):
+        users_by_split = {}
+        for uid in range(10_000):
+            users_by_split.setdefault(assign_user_split(uid, 42, 0.8, 0.1), uid)
+            if len(users_by_split) == 3:
+                break
+        users = sorted(users_by_split.values())
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "dataset.csv.gz"
+            output = root / "processed"
+            with gzip.open(source, "wt", encoding="utf-8", newline="") as stream:
+                writer = csv.writer(stream)
+                writer.writerow(("uid", "d", "t", "x", "y"))
+                for uid in users:
+                    for day in (0, 1):
+                        writer.writerow((uid, day, 1, 1 + uid % 10, 2))
+                        writer.writerow((uid, day, 2, 2 + uid % 10, 3))
+            prepare_dataset(
+                source,
+                output,
+                max_users=len(users),
+                trajectory_length=4,
+                expected_md5=None,
+            )
+            with np.load(output / "split_indices.npz") as splits:
+                test_count = len(splits["test"])
+            cache_path = output / "processed_coeffs_Fixture_rdp_k_3_test.npy"
+            np.save(cache_path, np.zeros((test_count, 3, 2)))
+            config = {
+                "project": {"output_dir": str(root / "outputs")},
+                "data": {
+                    "trajectory_length": 4,
+                    "sample_count": -1,
+                    "dataset_type": "open_source",
+                    "dataset_folder": str(output),
+                    "region": "Fixture",
+                    "split_file": "split_indices.npz",
+                    "parametrized": True,
+                    "parametrized_method": "rdp_k",
+                    "parametrized_M": 3,
+                    "parameterization_workers": 1,
+                    "norm1by1": True,
+                    "od_finer": False,
+                    "geohash": False,
+                },
+                "condition": {"enabled": True, "condition_type": "full"},
+            }
+            dataset = FlowMatchingDataset(config, mode="test")
+            self.assertTrue(np.any(np.abs(dataset.traj_segments) > 0.0))
+            self.assertTrue(np.any(np.abs(np.load(cache_path)) > 0.0))
+
 
 if __name__ == "__main__":
     unittest.main()

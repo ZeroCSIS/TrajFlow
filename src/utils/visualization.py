@@ -159,6 +159,10 @@ def visualize_trajectories(sol, ground_truth, M, parametrized,save_folder,**kwar
         pass
     # get trajectory length from **kwargs, if not provided, use default 120
     traj_length = kwargs.get('traj_length', 120)
+    representation_note = kwargs.get('representation_note')
+    point_label = f"{M} plotted points"
+    if representation_note:
+        point_label += f"; {representation_note}"
 
     max_trajs_to_plot = min(300, sample_count)
 
@@ -240,7 +244,7 @@ def visualize_trajectories(sol, ground_truth, M, parametrized,save_folder,**kwar
         traj = generated_trajectories[i]  # Shape: [M, 2]
         plt.plot(traj[:, 1], traj[:, 0], '-', color='blue', linewidth=1, alpha=0.1)
 
-    plt.title(f"Generated Trajectories (M={M} points)")
+    plt.title(f"Generated Trajectories ({point_label})")
     plt.xlabel("X")
     plt.ylabel("Y")
     plt.grid(True, alpha=0.3)
@@ -255,7 +259,7 @@ def visualize_trajectories(sol, ground_truth, M, parametrized,save_folder,**kwar
         traj = gt_trajectories[i]  # Shape: [M, 2]
         plt.plot(traj[:, 1], traj[:, 0], '-', color='red', linewidth=1, alpha=0.1)
 
-    plt.title(f"Ground Truth Trajectories (M={M} points)")
+    plt.title(f"Ground Truth Trajectories ({point_label})")
     plt.xlabel("X")
     plt.ylabel("Y")
     plt.grid(True, alpha=0.3)
@@ -279,7 +283,9 @@ def visualize_trajectories(sol, ground_truth, M, parametrized,save_folder,**kwar
     custom_lines = [Line2D([0], [0], color='blue', lw=2),
                   Line2D([0], [0], color='red', lw=2)]
     plt.legend(custom_lines, ['Generated', 'Ground Truth'])
-    plt.title(f"Generated (blue) vs Ground Truth (red) Trajectories (M={M} points)")
+    plt.title(
+        f"Generated (blue) vs Ground Truth (red) Trajectories ({point_label})"
+    )
     plt.xlabel("X")
     plt.ylabel("Y")
     plt.grid(True, alpha=0.3)

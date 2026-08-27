@@ -72,6 +72,8 @@ inference:
 evaluation:
   enabled: true
   max_curve_pairs: 200
+  # Drawn without overlap from the same held-out test split.
+  real_control_samples: 200
 
 visualization:
   num_samples: 200

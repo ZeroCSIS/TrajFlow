@@ -151,15 +151,32 @@ class FlowMatchingDataset(Dataset):
             cache_valid = False
             if os.path.exists(processed_data_path):
                 print(f"Loading pre-processed coefficients from {processed_data_path}")
+                source_trajectories = np.asarray(self.traj_segments)
                 self.coffs = np.load(processed_data_path)
-                if len(self.coffs) == self.dataset_size:
+                expected_shape = (
+                    self.dataset_size,
+                    int(config['data']['parametrized_M']),
+                    2,
+                )
+                cache_is_finite = np.isfinite(self.coffs).all()
+                cache_is_suspiciously_zero = (
+                    np.any(np.abs(source_trajectories) > 1e-12)
+                    and not np.any(np.abs(self.coffs) > 1e-12)
+                )
+                if (
+                    self.coffs.shape == expected_shape
+                    and cache_is_finite
+                    and not cache_is_suspiciously_zero
+                ):
                     self.traj_segments = self.coffs
                     cache_valid = True
                 else:
                     print(
-                        f"Ignoring coefficient cache with {len(self.coffs)} samples; "
-                        f"current {self.mode} split has {self.dataset_size}"
+                        "Ignoring invalid coefficient cache: "
+                        f"shape={self.coffs.shape}, expected={expected_shape}, "
+                        f"finite={cache_is_finite}, all_zero={not np.any(self.coffs)}"
                     )
+                    self.traj_segments = source_trajectories
                     self._convert_to_coefficients(
                         para_M=config['data']['parametrized_M'],
                         method=config['data']['parametrized_method'],
@@ -416,7 +433,7 @@ class FlowMatchingDataset(Dataset):
             if para_dict is not None:
                 return para_dict['simplified_points']
             else:
-                return np.zeros((para_M, 2))  # Fallback if parameterization fails
+                return None
         elif method == 'rdp_k_withod':
             # Special case for methods that need start/end point info
             para_dict = {
@@ -428,7 +445,7 @@ class FlowMatchingDataset(Dataset):
             if para_dict is not None:
                 return para_dict['simplified_points']
             else:
-                return np.zeros((para_M, 2))
+                return None
         else:
             print(f"Warning: Using {method} for parameterization")
             return point2para(traj, method=method)
@@ -467,11 +484,28 @@ class FlowMatchingDataset(Dataset):
                 ))
 
         # Collect results
+        failed_indices = []
         for i, result in enumerate(results):
             if result is not None:
                 coeffs[i] = result
             else:
-                print(f"Warning: Parameterization failed for trajectory {i}")
+                failed_indices.append(i)
+        if failed_indices:
+            preview = failed_indices[:10]
+            raise RuntimeError(
+                f"Parameterization failed for {len(failed_indices)} trajectories; "
+                f"first indices: {preview}"
+            )
+        if not np.isfinite(coeffs).all():
+            raise RuntimeError("Parameterization produced NaN or infinite coefficients")
+        source_trajectories = np.asarray(self.traj_segments)
+        if (
+            np.any(np.abs(source_trajectories) > 1e-12)
+            and not np.any(np.abs(coeffs) > 1e-12)
+        ):
+            raise RuntimeError(
+                "Parameterization collapsed a non-degenerate dataset to an all-zero cache"
+            )
         self.coffs = coeffs
         self.traj_segments = self.coffs
 

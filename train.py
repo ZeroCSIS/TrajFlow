@@ -32,9 +32,12 @@ def parse_args():
 
 
 def _git_value(*args):
-    result = subprocess.run(
-        ['git', *args], capture_output=True, text=True, check=False
-    )
+    try:
+        result = subprocess.run(
+            ['git', *args], capture_output=True, text=True, check=False
+        )
+    except OSError:
+        return None
     return result.stdout.strip() if result.returncode == 0 else None
 
 
@@ -53,12 +56,16 @@ def write_run_manifest(path, config_path, config, device, train_dataset, validat
             with open(dataset_summary_path, encoding='utf-8') as stream:
                 dataset_summary = json.load(stream)
 
+    git_status = _git_value('status', '--porcelain')
     manifest = {
         'config_path': os.path.abspath(config_path),
         'seed': int(config.get('project', {}).get('seed', 42)),
         'deterministic': bool(config.get('project', {}).get('deterministic', True)),
-        'git_commit': _git_value('rev-parse', 'HEAD'),
-        'git_dirty': bool(_git_value('status', '--porcelain')),
+        'git_commit': (
+            _git_value('rev-parse', 'HEAD')
+            or os.environ.get('TRAJFLOW_GIT_COMMIT')
+        ),
+        'git_dirty': None if git_status is None else bool(git_status),
         'python': sys.version,
         'platform': platform.platform(),
         'torch': torch.__version__,

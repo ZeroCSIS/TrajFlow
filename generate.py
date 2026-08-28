@@ -247,6 +247,7 @@ def write_generation_manifest(
         'condition_mode': condition_mode,
         'samples_per_condition': int(samples_per_condition),
         'metric_workers': int(metric_workers),
+        'legacy_rowwise_csv_outputs_written': bool(samples_per_condition == 1),
         'condition_type': config.get('condition', {}).get('condition_type'),
         'condition_contains_ground_truth_summary': (
             config.get('condition', {}).get('condition_type') == 'full'
@@ -573,54 +574,59 @@ def generate_trajectories(model, all_gt_data, all_head, lengths, traj_mean, traj
                                  grid_metadata=dataset.grid_metadata,
                                  density_bins=density_bins)
 
-    # Save trajectories separately
-    save_trajectories_to_csv(
-        trajs=total_gen_trajs,
-        cond_info=total_cond_info,
-        cond_std=dataset.cond_std,
-        cond_mean=dataset.cond_mean,
-        save_dir=save_dir,
-        traj_type="generated"
-    )
-
-    save_trajectories_to_csv(
-        trajs=total_gt_trajs,
-        cond_info=total_cond_info,
-        cond_std=dataset.cond_std,
-        cond_mean=dataset.cond_mean,
-        save_dir=save_dir,
-        traj_type="ground_truth"
-    )
-
-    # Also save raw ground truth if available
-    if raw_gt_trajs:
+    # K>1 has a lossless compressed candidate bundle below.  Expanding the
+    # same arrays into several multi-million-row legacy CSVs adds no evidence
+    # and can dominate the diagnostic runtime.
+    if samples_per_condition == 1:
         save_trajectories_to_csv(
-            trajs=raw_gt_trajs,
-            cond_info=unique_cond_info,
-            cond_std=dataset.cond_std,
-            cond_mean=dataset.cond_mean,
-            save_dir=save_dir,
-            traj_type="raw_ground_truth"
-        )
-
-    if SAVE_RAW_TRAJS:
-        # Save raw generated trajectories to CSV
-        save_trajectories_to_csv(
-            trajs=total_raw_gen_trajs,
+            trajs=total_gen_trajs,
             cond_info=total_cond_info,
             cond_std=dataset.cond_std,
             cond_mean=dataset.cond_mean,
             save_dir=save_dir,
-            traj_type="generated_before_denormalization"
+            traj_type="generated"
         )
-        # Save raw ground truth trajectories to CSV
+
         save_trajectories_to_csv(
-            trajs=total_raw_gt_trajs,
+            trajs=total_gt_trajs,
             cond_info=total_cond_info,
             cond_std=dataset.cond_std,
             cond_mean=dataset.cond_mean,
             save_dir=save_dir,
-            traj_type="ground_truth_before_denormalization"
+            traj_type="ground_truth"
+        )
+
+        if raw_gt_trajs:
+            save_trajectories_to_csv(
+                trajs=raw_gt_trajs,
+                cond_info=unique_cond_info,
+                cond_std=dataset.cond_std,
+                cond_mean=dataset.cond_mean,
+                save_dir=save_dir,
+                traj_type="raw_ground_truth"
+            )
+
+        if SAVE_RAW_TRAJS:
+            save_trajectories_to_csv(
+                trajs=total_raw_gen_trajs,
+                cond_info=total_cond_info,
+                cond_std=dataset.cond_std,
+                cond_mean=dataset.cond_mean,
+                save_dir=save_dir,
+                traj_type="generated_before_denormalization"
+            )
+            save_trajectories_to_csv(
+                trajs=total_raw_gt_trajs,
+                cond_info=total_cond_info,
+                cond_std=dataset.cond_std,
+                cond_mean=dataset.cond_mean,
+                save_dir=save_dir,
+                traj_type="ground_truth_before_denormalization"
+            )
+    else:
+        print(
+            "Skipping legacy row-wise trajectory CSVs for K>1; "
+            "best_of_k_candidates.npz preserves the candidate arrays."
         )
 
     metrics_path = None
@@ -670,6 +676,12 @@ def generate_trajectories(model, all_gt_data, all_head, lengths, traj_mean, traj
             )
             metrics_filename = 'baseline_metrics.json'
         else:
+            np.savez_compressed(
+                os.path.join(save_dir, 'best_of_k_candidates.npz'),
+                generated_candidates=generated_for_metrics,
+                paired_raw_reference=paired_raw_reference,
+                selected_test_local_indices=selected_indices,
+            )
             metrics = compute_best_of_k_metrics(
                 generated_for_metrics,
                 paired_raw_reference,
@@ -678,12 +690,6 @@ def generate_trajectories(model, all_gt_data, all_head, lengths, traj_mean, traj
                 workers=metric_workers,
             )
             metrics_filename = 'best_of_k_metrics.json'
-            np.savez_compressed(
-                os.path.join(save_dir, 'best_of_k_candidates.npz'),
-                generated_candidates=generated_for_metrics,
-                paired_raw_reference=paired_raw_reference,
-                selected_test_local_indices=selected_indices,
-            )
         metrics_path = os.path.join(save_dir, metrics_filename)
         with open(metrics_path, 'w', encoding='utf-8') as stream:
             json.dump(metrics, stream, ensure_ascii=False, indent=2)

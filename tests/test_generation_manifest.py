@@ -93,6 +93,7 @@ class GenerationManifestTest(unittest.TestCase):
             self.assertEqual(manifest["selected_source_sample_indices"], [10, 12])
             self.assertEqual(manifest["real_control_source_sample_indices"], [11, 13])
             self.assertEqual(manifest["array_shapes"]["generated"], [2, 3, 2])
+            self.assertTrue(manifest["legacy_rowwise_csv_outputs_written"])
 
 
 if __name__ == "__main__":

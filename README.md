@@ -120,7 +120,8 @@ CUDA_VISIBLE_DEVICES=<confirmed-idle-card> python generate.py \
 ```
 
 For K greater than one, generation writes `best_of_k_metrics.json` and a
-compressed candidate array. The report contains the minimum paired exact DTW
+compressed candidate array instead of expanding the same arrays into the legacy
+row-wise trajectory CSVs. The report contains the minimum paired exact DTW
 and continuous Fréchet distance across K, all-pair aligned-point diversity, a
 deterministic O-to-D line control, and separate point/trajectory OOB rates.
 Best-of-K is an oracle coverage diagnostic: increasing K can improve it by

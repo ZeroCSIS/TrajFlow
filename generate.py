@@ -17,6 +17,7 @@ from torch.utils.data import DataLoader
 from data_utils.profile_yjmob import write_dataset_profile
 from src.data.transforms import para2point_batch
 from src.eval.metrics import (
+    compute_best_of_k_metrics,
     compute_control_metrics,
     origin_destination_straight_lines,
 )
@@ -182,6 +183,8 @@ def write_generation_manifest(
     sampling_steps,
     sampling_method,
     condition_mode,
+    samples_per_condition=1,
+    metric_workers=1,
     dataset_profile_path=None,
 ):
     """Write provenance for a generation/evaluation run."""
@@ -206,7 +209,7 @@ def write_generation_manifest(
             for index in range(torch.cuda.device_count())
         ]
     manifest = {
-        'schema_version': 'trajflow-generation-manifest-v1',
+        'schema_version': 'trajflow-generation-manifest-v2',
         'created_at_utc': datetime.now(timezone.utc).isoformat(),
         'config_path': os.path.abspath(config_path) if config_path else None,
         'config_sha256': _sha256_file(config_path),
@@ -233,6 +236,8 @@ def write_generation_manifest(
         'sampling_steps': int(sampling_steps),
         'sampling_method': sampling_method,
         'condition_mode': condition_mode,
+        'samples_per_condition': int(samples_per_condition),
+        'metric_workers': int(metric_workers),
         'condition_type': config.get('condition', {}).get('condition_type'),
         'condition_contains_ground_truth_summary': (
             config.get('condition', {}).get('condition_type') == 'full'
@@ -285,9 +290,16 @@ def generate_trajectories(model, all_gt_data, all_head, lengths, traj_mean, traj
                           cond_mean, cond_std, config, batch_size, num_batches,
                           result_dir, dataset, condition_mode="real", generate_num=10,
                           save_dir='./test_output', checkpoint_path=None,
-                          config_path=None):
+                          config_path=None, samples_per_condition=1,
+                          metric_workers=1):
     """Generate trajectories using flow matching model"""
     os.makedirs(save_dir, exist_ok=True)
+    samples_per_condition = int(samples_per_condition)
+    metric_workers = int(metric_workers)
+    if samples_per_condition <= 0:
+        raise ValueError("samples_per_condition must be positive")
+    if metric_workers <= 0:
+        raise ValueError("metric_workers must be positive")
 
     # IF SAVE TRAJECTORIES BEFORE DENORMALIZATION
     SAVE_RAW_TRAJS = True
@@ -358,16 +370,30 @@ def generate_trajectories(model, all_gt_data, all_head, lengths, traj_mean, traj
             else:
                 condition_sample[:, 8] = transmode_switcher[condition_mode]
             condition_sample = condition_sample.to(device)
-            current_batch_size = x_1_sample.size(0)
+            unique_batch_size = x_1_sample.size(0)
 
             # Calculate correct indices for this batch
             start_idx = batch_idx * batch_size
-            end_idx = min(start_idx + current_batch_size, len(selected_indices))
+            end_idx = min(start_idx + unique_batch_size, len(selected_indices))
             batch_indices = selected_indices[start_idx:end_idx].tolist()
-            all_indices.extend(batch_indices)
+            all_indices.extend(
+                np.repeat(batch_indices, samples_per_condition).tolist()
+            )
+
+            if samples_per_condition > 1:
+                x_1_sample = x_1_sample.repeat_interleave(
+                    samples_per_condition,
+                    dim=0,
+                )
+                condition_sample = condition_sample.repeat_interleave(
+                    samples_per_condition,
+                    dim=0,
+                )
+            current_batch_size = x_1_sample.size(0)
 
             print(
-                f"Processing batch {batch_idx + 1}/{(generate_num + batch_size - 1) // batch_size}, size: {current_batch_size}")
+                f"Processing batch {batch_idx + 1}/{(generate_num + batch_size - 1) // batch_size}, "
+                f"conditions: {unique_batch_size}, draws: {current_batch_size}")
 
             # Sample with condition using full input
             sol = inference.sample(n_samples=current_batch_size, n_steps=n_steps,
@@ -378,9 +404,22 @@ def generate_trajectories(model, all_gt_data, all_head, lengths, traj_mean, traj
         else:
             x_1_sample = batch_data.to(device)
             condition_sample = None
+            unique_batch_size = x_1_sample.size(0)
+            start_idx = batch_idx * batch_size
+            end_idx = min(start_idx + unique_batch_size, len(selected_indices))
+            batch_indices = selected_indices[start_idx:end_idx].tolist()
+            all_indices.extend(
+                np.repeat(batch_indices, samples_per_condition).tolist()
+            )
+            if samples_per_condition > 1:
+                x_1_sample = x_1_sample.repeat_interleave(
+                    samples_per_condition,
+                    dim=0,
+                )
             current_batch_size = x_1_sample.size(0)
             print(
-                f"Processing batch {batch_idx + 1}/{(generate_num + batch_size - 1) // batch_size}, size: {current_batch_size}")
+                f"Processing batch {batch_idx + 1}/{(generate_num + batch_size - 1) // batch_size}, "
+                f"conditions: {unique_batch_size}, draws: {current_batch_size}")
             # Sample without condition
             sol = inference.sample(n_samples=current_batch_size, n_steps=n_steps, method=solve_method)
 
@@ -477,6 +516,10 @@ def generate_trajectories(model, all_gt_data, all_head, lengths, traj_mean, traj
         for idx in all_indices:
             if idx < len(all_head):
                 total_cond_info.append(all_head[idx])
+    unique_cond_info = (
+        [all_head[index] for index in selected_indices]
+        if config['condition']['enabled'] else []
+    )
 
     # Convert final sample (last timestep) trajectories to the expected format
     total_gen_trajs = [x.reshape(traj_length, 2) for x in all_sol_np]
@@ -540,7 +583,7 @@ def generate_trajectories(model, all_gt_data, all_head, lengths, traj_mean, traj
     if raw_gt_trajs:
         save_trajectories_to_csv(
             trajs=raw_gt_trajs,
-            cond_info=total_cond_info,
+            cond_info=unique_cond_info,
             cond_std=dataset.cond_std,
             cond_mean=dataset.cond_mean,
             save_dir=save_dir,
@@ -568,10 +611,28 @@ def generate_trajectories(model, all_gt_data, all_head, lengths, traj_mean, traj
         )
 
     metrics_path = None
+    generated_array = np.asarray(total_gen_trajs)
+    parameterized_target_array = np.asarray(total_gt_trajs)
+    if samples_per_condition > 1:
+        generated_for_metrics = generated_array.reshape(
+            len(selected_indices),
+            samples_per_condition,
+            traj_length,
+            2,
+        )
+        parameterized_target_for_manifest = parameterized_target_array.reshape(
+            len(selected_indices),
+            samples_per_condition,
+            traj_length,
+            2,
+        )
+    else:
+        generated_for_metrics = generated_array
+        parameterized_target_for_manifest = parameterized_target_array
     manifest_arrays = {
-        'generated': np.asarray(total_gen_trajs),
+        'generated': generated_for_metrics,
         'paired_raw_reference': paired_raw_reference,
-        'parameterized_training_target': np.asarray(total_gt_trajs),
+        'parameterized_training_target': parameterized_target_for_manifest,
     }
     if evaluation_config.get('enabled', False):
         real_control_trajs = raw_dataset_trajectories(
@@ -584,20 +645,37 @@ def generate_trajectories(model, all_gt_data, all_head, lengths, traj_mean, traj
         straight_line_control = origin_destination_straight_lines(
             paired_raw_reference
         )
-        metrics = compute_control_metrics(
-            np.asarray(total_gen_trajs),
-            paired_raw_reference,
-            real_control_trajs,
-            parameterized_reference=np.asarray(total_gt_trajs),
-            grid_metadata=dataset.grid_metadata,
-            max_pairs=int(evaluation_config.get('max_curve_pairs', 200)),
-            density_bins=density_bins,
-        )
-        metrics_path = os.path.join(save_dir, 'baseline_metrics.json')
+        if samples_per_condition == 1:
+            metrics = compute_control_metrics(
+                generated_array,
+                paired_raw_reference,
+                real_control_trajs,
+                parameterized_reference=parameterized_target_array,
+                grid_metadata=dataset.grid_metadata,
+                max_pairs=int(evaluation_config.get('max_curve_pairs', 200)),
+                density_bins=density_bins,
+            )
+            metrics_filename = 'baseline_metrics.json'
+        else:
+            metrics = compute_best_of_k_metrics(
+                generated_for_metrics,
+                paired_raw_reference,
+                grid_metadata=dataset.grid_metadata,
+                density_bins=density_bins,
+                workers=metric_workers,
+            )
+            metrics_filename = 'best_of_k_metrics.json'
+            np.savez_compressed(
+                os.path.join(save_dir, 'best_of_k_candidates.npz'),
+                generated_candidates=generated_for_metrics,
+                paired_raw_reference=paired_raw_reference,
+                selected_test_local_indices=selected_indices,
+            )
+        metrics_path = os.path.join(save_dir, metrics_filename)
         with open(metrics_path, 'w', encoding='utf-8') as stream:
             json.dump(metrics, stream, ensure_ascii=False, indent=2)
             stream.write('\n')
-        print(f"Baseline metrics saved to {metrics_path}")
+        print(f"Evaluation metrics saved to {metrics_path}")
         manifest_arrays.update({
             'independent_real_control': real_control_trajs,
             'od_straight_line_control': straight_line_control,
@@ -633,6 +711,8 @@ def generate_trajectories(model, all_gt_data, all_head, lengths, traj_mean, traj
         sampling_steps=n_steps,
         sampling_method=solve_method,
         condition_mode=condition_mode,
+        samples_per_condition=samples_per_condition,
+        metric_workers=metric_workers,
         dataset_profile_path=dataset_profile_path,
     )
     print(f"Generation manifest saved to {manifest_path}")
@@ -787,6 +867,18 @@ def main():
     parser.add_argument("--num_batches", type=int, default=10, help="Number of batches to generate")
     parser.add_argument("--batch_size", type=int, default=32, help="batch_size for generation (default 32 for memory efficiency, reduce to 16 or 8 if OOM occurs)")
     parser.add_argument("--generate_num", type=int, default=1000, help="Total num for generation")
+    parser.add_argument(
+        "--samples-per-condition",
+        type=int,
+        default=1,
+        help="Independent draws per selected condition (K for best-of-K evaluation)",
+    )
+    parser.add_argument(
+        "--metric-workers",
+        type=int,
+        default=1,
+        help="CPU processes used for candidate/reference DTW and Frechet metrics",
+    )
     parser.add_argument("--placeholder", type=str, default='real', help="Use placeholder conditions")
     parser.add_argument("--USE_GIVEN_STEPS", type=bool, default=False, help="If using the number of given sampling steps parameters")
     parser.add_argument("--steps", type=int, default=10, help="Number of sampling steps")
@@ -865,6 +957,8 @@ def main():
 
     # Create results directory
     result_dir = os.path.join(args.output_dir, f"generation_{args.generate_num}_{condition_mode}_test")
+    if args.samples_per_condition > 1:
+        result_dir += f"_k{args.samples_per_condition}"
     if args.USE_GIVEN_STEPS:
         result_dir += f"_steps_{args.steps}"
     else:
@@ -1024,11 +1118,14 @@ def main():
         save_dir=result_dir,
         checkpoint_path=checkpoint_path,
         config_path=run_config_path,
+        samples_per_condition=args.samples_per_condition,
+        metric_workers=args.metric_workers,
     )
 
     print(f"Generation complete. Results saved to {result_dir}")
     print(
-        f"Generated {len(gen_trajs)} trajectories using {effective_steps} steps "
+        f"Generated {len(gen_trajs)} trajectories for {args.generate_num} selected "
+        f"conditions at K={args.samples_per_condition} using {effective_steps} steps "
         f"with {effective_method} method"
     )
 if __name__ == "__main__":

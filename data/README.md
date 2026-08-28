@@ -113,6 +113,21 @@ Columns 2-6 are standardized using training users only. The converter rejects
 unexpected columns, out-of-range slots/cells, unsorted input, checksum mismatch,
 and accidental overwrite unless `--overwrite` is explicitly passed.
 
+`data_utils/analyze_yjmob_habits.py` reads the official raw file together with a
+prepared `manifest.csv` and writes three diagnostic artifacts:
+
+- `habit_profile.json`: aggregate raw-slot coverage, missing-gap exposure,
+  per-user/per-timeslot stability, chronological holdout controls, shuffled-null
+  results, lagged similarity, and masked weekly-phase sensitivity;
+- `timeslot_stability.csv`: 48 aggregate rows suitable for plotting;
+- `user_slot_stability.csv`: anonymous cohort-level reproducibility rows. Keep
+  this detailed intermediate in the experiment archive; publish aggregate
+  statistics rather than individual rows.
+
+The profiler does not interpolate raw observations and does not infer the
+hidden civil calendar or location. It excludes day 27 by default, matching the
+official data descriptor and the adapter.
+
 ## Using Authorized Real Data
 
 If you have authorized access to your own trajectory data, convert

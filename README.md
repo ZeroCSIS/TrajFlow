@@ -101,6 +101,52 @@ CUDA_VISIBLE_DEVICES=<2-or-3> python train.py \
   --run-name yjmob1k-convergence
 ```
 
+### Conditional coverage and longitudinal-habit diagnostics
+
+Best-of-K generation reuses the frozen checkpoint and the same deterministic
+test-condition selection. `--generate_num` is the number of unique conditions;
+`--samples-per-condition` is the number of independent draws for each one:
+
+```bash
+CUDA_VISIBLE_DEVICES=<confirmed-idle-card> python generate.py \
+  --config /path/to/frozen/config.yaml \
+  --checkpoint /path/to/best_model.pt \
+  --device cuda:0 \
+  --generate_num 200 \
+  --samples-per-condition 20 \
+  --metric-workers 8 \
+  --batch_size 8 \
+  --exp_savename_str yjmob1k-best-of-20
+```
+
+For K greater than one, generation writes `best_of_k_metrics.json` and a
+compressed candidate array. The report contains the minimum paired exact DTW
+and continuous Fréchet distance across K, all-pair aligned-point diversity, a
+deterministic O-to-D line control, and separate point/trajectory OOB rates.
+Best-of-K is an oracle coverage diagnostic: increasing K can improve it by
+construction, so it is not a training or model-selection gate.
+
+The raw-data habit profiler uses the exact user cohort retained in a prepared
+manifest and never uses the 120-point interpolation:
+
+```bash
+python data_utils/analyze_yjmob_habits.py \
+  --input data/raw/yjmob100k/yjmob100k-dataset1.csv.gz \
+  --manifest data/processed/yjmob100k_d1_1k/manifest.csv \
+  --output-dir outputs_yjmob_habits/seed42-1k \
+  --null-repeats 20 \
+  --seed 42
+```
+
+It reports raw-slot coverage and internal gaps, per-user/per-timeslot modal-cell
+rates, chronological holdout accuracy against a population-timeslot control,
+lagged cross-day similarity, and a null that shuffles locations only among each
+user-day's observed timeslots. The official data descriptor defines `d` as a
+masked date and does not publish its civil-date mapping. Consequently, the
+profiler reports all seven `d % 7` offsets and an explicitly inferred
+"weekend-like" low-activity phase pair; it never assigns civil weekday names or
+attempts to reverse-engineer the hidden calendar.
+
 Training:
 ```bash
 python train.py --config ./src/config/config_chengdu.yaml

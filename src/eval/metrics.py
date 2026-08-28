@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from concurrent.futures import ProcessPoolExecutor
 
 import numpy as np
 
@@ -483,4 +484,327 @@ def compute_control_metrics(
                 - representation_vs_raw["continuous_frechet_median_km"]
             ),
         }
+    return result
+
+
+def _distribution_summary(values: np.ndarray) -> dict[str, float | int]:
+    values = np.asarray(values, dtype=np.float64)
+    if values.size == 0:
+        raise ValueError("Cannot summarize an empty distribution")
+    return {
+        "count": int(values.size),
+        "min": float(values.min()),
+        "p10": float(np.quantile(values, 0.10)),
+        "p50": float(np.quantile(values, 0.50)),
+        "p90": float(np.quantile(values, 0.90)),
+        "max": float(values.max()),
+        "mean": float(values.mean()),
+    }
+
+
+def _curve_distance_pair(
+    pair: tuple[np.ndarray, np.ndarray],
+) -> tuple[float, float]:
+    generated, reference = pair
+    return (
+        dynamic_time_warping(generated, reference),
+        continuous_frechet(generated, reference),
+    )
+
+
+def _candidate_curve_distances(
+    generated: np.ndarray,
+    reference: np.ndarray,
+    *,
+    workers: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    condition_count, samples_per_condition = generated.shape[:2]
+    pairs = [
+        (generated[condition_index, sample_index], reference[condition_index])
+        for condition_index in range(condition_count)
+        for sample_index in range(samples_per_condition)
+    ]
+    if workers <= 1:
+        values = list(map(_curve_distance_pair, pairs))
+    else:
+        chunksize = max(1, len(pairs) // (workers * 8))
+        with ProcessPoolExecutor(max_workers=workers) as executor:
+            values = list(
+                executor.map(_curve_distance_pair, pairs, chunksize=chunksize)
+            )
+    distances = np.asarray(values, dtype=np.float64).reshape(
+        condition_count,
+        samples_per_condition,
+        2,
+    )
+    return distances[..., 0], distances[..., 1]
+
+
+def _as_candidate_trajectories(
+    generated: np.ndarray,
+    *,
+    condition_count: int,
+) -> np.ndarray:
+    generated = np.asarray(generated, dtype=np.float64)
+    if generated.ndim == 3 and generated.shape[-1] == 2:
+        if len(generated) % condition_count:
+            raise ValueError(
+                "Flattened candidates must be divisible by the reference count"
+            )
+        generated = generated.reshape(
+            condition_count,
+            len(generated) // condition_count,
+            generated.shape[1],
+            2,
+        )
+    if generated.ndim != 4 or generated.shape[-1] != 2:
+        raise ValueError(
+            "Candidates must have shape (N, K, L, 2) or (N*K, L, 2)"
+        )
+    if generated.shape[0] != condition_count:
+        raise ValueError("Candidate and reference condition counts differ")
+    if generated.shape[1] <= 0 or generated.shape[2] < 2:
+        raise ValueError("At least one candidate with two points is required")
+    if not np.isfinite(generated).all():
+        raise ValueError("Candidates contain NaN or infinite values")
+    return generated
+
+
+def compute_best_of_k_metrics(
+    generated: np.ndarray,
+    reference: np.ndarray,
+    *,
+    grid_metadata: dict | None = None,
+    density_bins: int | tuple[int, int] | None = None,
+    workers: int = 1,
+) -> dict[str, object]:
+    """Diagnose conditional coverage from K draws without defining a model gate.
+
+    DTW and continuous Frechet are evaluated between every candidate and its
+    paired raw reference.  Diversity is the mean Euclidean distance between
+    aligned points for every unordered pair of candidates under one condition;
+    it is deliberately cheaper than the two oracle metrics and is never mixed
+    into them.
+    """
+    reference = _as_trajectories(reference)
+    generated = _as_candidate_trajectories(
+        generated,
+        condition_count=len(reference),
+    )
+    workers = int(workers)
+    if workers <= 0:
+        raise ValueError("workers must be positive")
+
+    condition_count, samples_per_condition, trajectory_length, _ = generated.shape
+    metadata = grid_metadata or {}
+    width = int(metadata.get("width", 200))
+    height = int(metadata.get("height", 200))
+    coordinate_min = float(metadata.get("coordinate_min", 1))
+    cell_size_km = float(metadata.get("cell_size_m", 500.0)) / 1000.0
+    normalized_density_bins = _normalize_density_bins(
+        density_bins,
+        width=width,
+        height=height,
+    )
+
+    dtw_grid, frechet_grid = _candidate_curve_distances(
+        generated,
+        reference,
+        workers=workers,
+    )
+    dtw_km = dtw_grid * cell_size_km
+    frechet_km = frechet_grid * cell_size_km
+    best_dtw_indices = np.argmin(dtw_km, axis=1)
+    best_frechet_indices = np.argmin(frechet_km, axis=1)
+    row_indices = np.arange(condition_count)
+    best_dtw_km = dtw_km[row_indices, best_dtw_indices]
+    best_frechet_km = frechet_km[row_indices, best_frechet_indices]
+
+    x_min = coordinate_min - 0.5
+    x_max = coordinate_min + width - 0.5
+    y_min = coordinate_min - 0.5
+    y_max = coordinate_min + height - 0.5
+    point_in_bounds = (
+        (generated[..., 0] >= x_min)
+        & (generated[..., 0] < x_max)
+        & (generated[..., 1] >= y_min)
+        & (generated[..., 1] < y_max)
+    )
+    candidate_oob = np.any(~point_in_bounds, axis=2)
+    pooled_bounds = _bounds_summary(
+        generated.reshape(-1, trajectory_length, 2),
+        width=width,
+        height=height,
+        coordinate_min=coordinate_min,
+    )
+
+    pair_left, pair_right = np.triu_indices(samples_per_condition, k=1)
+    if len(pair_left):
+        pairwise_diversity_km = np.empty(
+            (condition_count, len(pair_left)),
+            dtype=np.float64,
+        )
+        for condition_index in range(condition_count):
+            point_distances = np.linalg.norm(
+                generated[condition_index, pair_left]
+                - generated[condition_index, pair_right],
+                axis=2,
+            )
+            pairwise_diversity_km[condition_index] = (
+                point_distances.mean(axis=1) * cell_size_km
+            )
+        condition_diversity_km = pairwise_diversity_km.mean(axis=1)
+        diversity = {
+            "unordered_pairs_per_condition": int(len(pair_left)),
+            "all_pair_distances_km": _distribution_summary(
+                pairwise_diversity_km.ravel()
+            ),
+            "condition_mean_pairwise_distance_km": _distribution_summary(
+                condition_diversity_km
+            ),
+        }
+    else:
+        pairwise_diversity_km = np.empty((condition_count, 0), dtype=np.float64)
+        condition_diversity_km = np.zeros(condition_count, dtype=np.float64)
+        diversity = {
+            "unordered_pairs_per_condition": 0,
+            "all_pair_distances_km": None,
+            "condition_mean_pairwise_distance_km": None,
+        }
+
+    straight_line = origin_destination_straight_lines(reference)
+    straight_metrics = compute_baseline_metrics(
+        straight_line,
+        reference,
+        grid_metadata=metadata,
+        max_pairs=condition_count,
+        density_bins=normalized_density_bins,
+    )
+
+    per_condition = []
+    candidate_rows = []
+    for condition_index in range(condition_count):
+        per_condition.append({
+            "condition_index": condition_index,
+            "best_dtw_sample_index": int(best_dtw_indices[condition_index]),
+            "best_dtw_km": float(best_dtw_km[condition_index]),
+            "best_continuous_frechet_sample_index": int(
+                best_frechet_indices[condition_index]
+            ),
+            "best_continuous_frechet_km": float(
+                best_frechet_km[condition_index]
+            ),
+            "candidate_out_of_bounds_count": int(
+                candidate_oob[condition_index].sum()
+            ),
+            "mean_pairwise_aligned_point_distance_km": (
+                float(condition_diversity_km[condition_index])
+                if len(pair_left) else None
+            ),
+        })
+        for sample_index in range(samples_per_condition):
+            candidate_rows.append({
+                "condition_index": condition_index,
+                "sample_index": sample_index,
+                "dtw_km": float(dtw_km[condition_index, sample_index]),
+                "continuous_frechet_km": float(
+                    frechet_km[condition_index, sample_index]
+                ),
+                "out_of_bounds": bool(
+                    candidate_oob[condition_index, sample_index]
+                ),
+            })
+
+    result = {
+        "schema_version": "trajflow-best-of-k-evaluation-v1",
+        "diagnostic_only": True,
+        "metric_semantics": {
+            "primary_reference": "the paired raw test trajectory for each condition",
+            "best_of_k": (
+                "minimum distance among K stochastic draws; increasing K can only "
+                "improve this oracle statistic and it is not a training or selection gate"
+            ),
+            "dtw": "exact accumulated Euclidean point cost",
+            "continuous_frechet": "Alt-Godau continuous curve distance",
+            "diversity": (
+                "all unordered candidate pairs under each condition; each pair is "
+                "the mean Euclidean distance between corresponding trajectory points"
+            ),
+            "straight_line_control": (
+                "one deterministic O-to-D interpolation per condition; repeating it "
+                "K times does not change its paired distance"
+            ),
+            "density_histogram_oob_policy": (
+                "out-of-grid candidate points are excluded from density JSD and OOB "
+                "is reported independently"
+            ),
+            "density_grid_bins": list(normalized_density_bins),
+        },
+        "condition_count": condition_count,
+        "samples_per_condition": samples_per_condition,
+        "array_shapes": {
+            "generated_candidates": list(generated.shape),
+            "paired_raw_reference": list(reference.shape),
+            "od_straight_line_control": list(straight_line.shape),
+        },
+        "best_of_k_vs_paired_raw_test": {
+            "dtw_km": _distribution_summary(best_dtw_km),
+            "continuous_frechet_km": _distribution_summary(best_frechet_km),
+        },
+        "all_candidates_vs_paired_raw_test": {
+            "dtw_km": _distribution_summary(dtw_km.ravel()),
+            "continuous_frechet_km": _distribution_summary(frechet_km.ravel()),
+        },
+        "candidate_diversity": diversity,
+        "pooled_candidate_density_js_divergence": density_jensen_shannon(
+            generated.reshape(-1, trajectory_length, 2),
+            reference,
+            width=width,
+            height=height,
+            coordinate_min=coordinate_min,
+            bins=normalized_density_bins,
+        ),
+        "out_of_bounds": {
+            "pooled_candidates": pooled_bounds,
+            "condition_with_any_oob_candidate_count": int(
+                np.any(candidate_oob, axis=1).sum()
+            ),
+            "condition_with_any_oob_candidate_rate": float(
+                np.any(candidate_oob, axis=1).mean()
+            ),
+            "condition_with_all_candidates_in_bounds_count": int(
+                np.all(~candidate_oob, axis=1).sum()
+            ),
+            "condition_with_all_candidates_in_bounds_rate": float(
+                np.all(~candidate_oob, axis=1).mean()
+            ),
+            "best_dtw_candidate_oob_count": int(
+                candidate_oob[row_indices, best_dtw_indices].sum()
+            ),
+            "best_dtw_candidate_oob_rate": float(
+                candidate_oob[row_indices, best_dtw_indices].mean()
+            ),
+            "best_continuous_frechet_candidate_oob_count": int(
+                candidate_oob[row_indices, best_frechet_indices].sum()
+            ),
+            "best_continuous_frechet_candidate_oob_rate": float(
+                candidate_oob[row_indices, best_frechet_indices].mean()
+            ),
+        },
+        "od_straight_line_vs_paired_raw_test": straight_metrics,
+        "best_of_k_improvement_over_straight_line": {
+            "positive_straight_minus_best_of_k_means_oracle_is_closer": True,
+            "dtw_median_km_straight_minus_best_of_k": float(
+                straight_metrics["dtw_median_km"] - np.median(best_dtw_km)
+            ),
+            "continuous_frechet_median_km_straight_minus_best_of_k": float(
+                straight_metrics["continuous_frechet_median_km"]
+                - np.median(best_frechet_km)
+            ),
+        },
+        "per_condition": per_condition,
+        "candidate_metrics": candidate_rows,
+        "grid_cell_size_km": cell_size_km,
+        "metric_workers": workers,
+    }
     return result

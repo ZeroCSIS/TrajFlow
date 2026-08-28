@@ -7,6 +7,7 @@ import numpy as np
 
 from src.eval.metrics import (
     compute_baseline_metrics,
+    compute_best_of_k_metrics,
     compute_control_metrics,
     continuous_frechet,
     density_jensen_shannon,
@@ -133,6 +134,86 @@ class BaselineMetricsTest(unittest.TestCase):
             metrics["representation_ceiling_comparison"][
                 "continuous_frechet_median_km_straight_minus_representation"
             ],
+            0.0,
+        )
+
+    def test_best_of_k_reports_oracle_diversity_and_oob_separately(self):
+        reference = np.asarray([
+            [[1.0, 1.0], [2.0, 1.0], [3.0, 1.0]],
+            [[4.0, 4.0], [4.0, 5.0], [5.0, 5.0]],
+        ])
+        generated = np.asarray([
+            [
+                reference[0],
+                reference[0] + np.asarray([0.0, 1.0]),
+            ],
+            [
+                reference[1] + np.asarray([1.0, 0.0]),
+                reference[1],
+            ],
+        ])
+        generated[1, 0, 1] = [99.0, 99.0]
+
+        metrics = compute_best_of_k_metrics(
+            generated,
+            reference,
+            grid_metadata={"width": 10, "height": 10, "cell_size_m": 500},
+            density_bins=5,
+            workers=1,
+        )
+
+        self.assertTrue(metrics["diagnostic_only"])
+        self.assertEqual(metrics["condition_count"], 2)
+        self.assertEqual(metrics["samples_per_condition"], 2)
+        self.assertEqual(
+            metrics["best_of_k_vs_paired_raw_test"]["dtw_km"]["p50"],
+            0.0,
+        )
+        self.assertEqual(
+            metrics["best_of_k_vs_paired_raw_test"][
+                "continuous_frechet_km"
+            ]["p50"],
+            0.0,
+        )
+        self.assertEqual(
+            metrics["candidate_diversity"]["unordered_pairs_per_condition"],
+            1,
+        )
+        self.assertEqual(
+            metrics["out_of_bounds"]["pooled_candidates"][
+                "out_of_bounds_trajectory_count"
+            ],
+            1,
+        )
+        self.assertEqual(len(metrics["candidate_metrics"]), 4)
+        self.assertEqual(
+            metrics["per_condition"][0]["best_dtw_sample_index"],
+            0,
+        )
+        self.assertEqual(
+            metrics["per_condition"][1][
+                "best_continuous_frechet_sample_index"
+            ],
+            1,
+        )
+
+    def test_best_of_k_accepts_condition_major_flattened_candidates(self):
+        reference = np.asarray([
+            [[1.0, 1.0], [2.0, 2.0]],
+            [[3.0, 3.0], [4.0, 4.0]],
+        ])
+        generated = np.repeat(reference[:, None, :, :], 2, axis=1)
+        metrics = compute_best_of_k_metrics(
+            generated.reshape(4, 2, 2),
+            reference,
+            grid_metadata={"width": 10, "height": 10},
+        )
+        self.assertEqual(
+            metrics["array_shapes"]["generated_candidates"],
+            [2, 2, 2, 2],
+        )
+        self.assertEqual(
+            metrics["candidate_diversity"]["all_pair_distances_km"]["max"],
             0.0,
         )
 

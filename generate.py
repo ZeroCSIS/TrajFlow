@@ -567,7 +567,7 @@ def generate_trajectories(model, all_gt_data, all_head, lengths, traj_mean, traj
                            parametrized=False, save_folder=save_dir,
                            representation_note=representation_note,
                            grid_metadata=dataset.grid_metadata)
-    visualize_density_comparison(total_gen_trajs, paired_raw_reference,
+    visualize_density_comparison(total_gen_trajs, visualization_reference,
                                  config['data']['trajectory_length'],
                                  save_dir,
                                  grid_metadata=dataset.grid_metadata,

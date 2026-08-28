@@ -89,6 +89,18 @@ metrics (density Jensen-Shannon divergence, paired exact DTW, and continuous
 Fréchet distance). Generation writes these values to `baseline_metrics.json`.
 Use a different `--seed` for an independent repeat.
 
+The bounded convergence configuration keeps the same data representation,
+model, objective, seed, and evaluation protocol. It raises only the training
+horizon to 100 epochs, stops after 10 validation epochs without improvement,
+and retains only `best_model.pt` plus `last_model.pt`. Expose only a confirmed
+idle physical card from the approved set before launching it:
+
+```bash
+CUDA_VISIBLE_DEVICES=<2-or-3> python train.py \
+  --config src/config/config_yjmob_convergence.yaml \
+  --run-name yjmob1k-convergence
+```
+
 Training:
 ```bash
 python train.py --config ./src/config/config_chengdu.yaml

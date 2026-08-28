@@ -12,9 +12,13 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
+
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from data_utils.prepare_yjmob import (
     OFFICIAL_DATASET1_MD5,

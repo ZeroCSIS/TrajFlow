@@ -10,7 +10,11 @@ from unittest import mock
 
 import numpy as np
 
-from generate import select_evaluation_indices, write_generation_manifest
+from generate import (
+    repeat_paired_references,
+    select_evaluation_indices,
+    write_generation_manifest,
+)
 
 
 class _Dataset:
@@ -27,6 +31,16 @@ class GenerationManifestTest(unittest.TestCase):
         np.testing.assert_array_equal(first, second)
         np.testing.assert_array_equal(first_control, second_control)
         self.assertFalse(set(first.tolist()) & set(first_control.tolist()))
+
+    def test_paired_reference_repetition_matches_condition_major_draws(self):
+        reference = np.asarray([
+            [[1.0, 1.0], [2.0, 2.0]],
+            [[3.0, 3.0], [4.0, 4.0]],
+        ])
+        repeated = repeat_paired_references(reference, 3)
+        self.assertEqual(repeated.shape, (6, 2, 2))
+        np.testing.assert_array_equal(repeated[:3], np.repeat(reference[:1], 3, axis=0))
+        np.testing.assert_array_equal(repeated[3:], np.repeat(reference[1:], 3, axis=0))
 
     def test_environment_provenance_and_checkpoint_hash_are_recorded(self):
         with tempfile.TemporaryDirectory() as temp_dir:

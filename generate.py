@@ -169,6 +169,15 @@ def raw_dataset_trajectories(dataset, indices, config, traj_mean, traj_std):
     return np.asarray(trajectories, dtype=np.float64)
 
 
+def repeat_paired_references(reference, samples_per_condition):
+    """Match condition-major candidate order for paired visualizations."""
+    reference = np.asarray(reference)
+    samples_per_condition = int(samples_per_condition)
+    if samples_per_condition <= 0:
+        raise ValueError("samples_per_condition must be positive")
+    return np.repeat(reference, samples_per_condition, axis=0)
+
+
 def write_generation_manifest(
     path,
     *,
@@ -549,7 +558,11 @@ def generate_trajectories(model, all_gt_data, all_head, lengths, traj_mean, traj
     else:
         representation_note = "direct point representation"
     density_bins = int(evaluation_config.get('density_bins', 100))
-    visualize_trajectories(total_gen_trajs, paired_raw_reference,
+    visualization_reference = repeat_paired_references(
+        paired_raw_reference,
+        samples_per_condition,
+    )
+    visualize_trajectories(total_gen_trajs, visualization_reference,
                            config['data']['trajectory_length'],
                            parametrized=False, save_folder=save_dir,
                            representation_note=representation_note,

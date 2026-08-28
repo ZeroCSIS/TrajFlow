@@ -41,6 +41,18 @@ def _git_value(*args):
     return result.stdout.strip() if result.returncode == 0 else None
 
 
+def _environment_bool(name):
+    value = os.environ.get(name)
+    if value is None:
+        return None
+    normalized = value.strip().lower()
+    if normalized in {'1', 'true', 'yes'}:
+        return True
+    if normalized in {'0', 'false', 'no'}:
+        return False
+    raise ValueError(f"{name} must be one of true/false, 1/0, or yes/no")
+
+
 def write_run_manifest(path, config_path, config, device, train_dataset, validation_dataset):
     cuda_devices = []
     if torch.cuda.is_available():
@@ -56,16 +68,22 @@ def write_run_manifest(path, config_path, config, device, train_dataset, validat
             with open(dataset_summary_path, encoding='utf-8') as stream:
                 dataset_summary = json.load(stream)
 
+    git_commit_from_repo = _git_value('rev-parse', 'HEAD')
     git_status = _git_value('status', '--porcelain')
     manifest = {
         'config_path': os.path.abspath(config_path),
         'seed': int(config.get('project', {}).get('seed', 42)),
         'deterministic': bool(config.get('project', {}).get('deterministic', True)),
-        'git_commit': (
-            _git_value('rev-parse', 'HEAD')
-            or os.environ.get('TRAJFLOW_GIT_COMMIT')
+        'git_commit': git_commit_from_repo or os.environ.get('TRAJFLOW_GIT_COMMIT'),
+        'git_dirty': (
+            bool(git_status)
+            if git_status is not None
+            else _environment_bool('TRAJFLOW_GIT_DIRTY')
         ),
-        'git_dirty': None if git_status is None else bool(git_status),
+        'git_provenance_source': (
+            'git' if git_commit_from_repo is not None else 'environment'
+            if os.environ.get('TRAJFLOW_GIT_COMMIT') is not None else None
+        ),
         'python': sys.version,
         'platform': platform.platform(),
         'torch': torch.__version__,
@@ -73,6 +91,16 @@ def write_run_manifest(path, config_path, config, device, train_dataset, validat
         'cuda_devices': cuda_devices,
         'train_samples': len(train_dataset),
         'validation_samples': len(validation_dataset) if validation_dataset is not None else 0,
+        'training_target_preflight': getattr(
+            train_dataset,
+            'parameterized_target_summary',
+            None,
+        ),
+        'validation_target_preflight': getattr(
+            validation_dataset,
+            'parameterized_target_summary',
+            None,
+        ) if validation_dataset is not None else None,
         'split_file': getattr(train_dataset, 'split_indices_path', None),
         'dataset_summary': dataset_summary,
     }

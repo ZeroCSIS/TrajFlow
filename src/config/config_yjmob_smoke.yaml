@@ -52,6 +52,8 @@ training:
   learning_rate: 0.0001
   print_every: 100
   save_every: 1
+  # Keep only validation-selected best_model.pt and terminal last_model.pt.
+  checkpoint_policy: best_and_last
   viz_bool: false
   use_validation: true
   validation_seed: 10042
@@ -72,6 +74,8 @@ inference:
 evaluation:
   enabled: true
   max_curve_pairs: 200
+  # The original 200x200 histogram is sampling-noise dominated at n=200.
+  density_bins: 40
   # Drawn without overlap from the same held-out test split.
   real_control_samples: 200
 

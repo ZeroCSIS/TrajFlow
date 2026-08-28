@@ -27,12 +27,24 @@ def density_jensen_shannon(
     width: int = 200,
     height: int = 200,
     coordinate_min: float = 1.0,
+    bins: int | tuple[int, int] | None = None,
 ) -> float:
     """Jensen-Shannon divergence between point-density histograms (natural log)."""
     generated = _as_trajectories(generated)
     reference = _as_trajectories(reference)
-    x_edges = np.arange(width + 1, dtype=np.float64) + coordinate_min - 0.5
-    y_edges = np.arange(height + 1, dtype=np.float64) + coordinate_min - 0.5
+    x_bins, y_bins = _normalize_density_bins(bins, width=width, height=height)
+    x_edges = np.linspace(
+        coordinate_min - 0.5,
+        coordinate_min + width - 0.5,
+        x_bins + 1,
+        dtype=np.float64,
+    )
+    y_edges = np.linspace(
+        coordinate_min - 0.5,
+        coordinate_min + height - 0.5,
+        y_bins + 1,
+        dtype=np.float64,
+    )
     generated_hist, _, _ = np.histogram2d(
         generated[..., 0].ravel(), generated[..., 1].ravel(), bins=(x_edges, y_edges)
     )
@@ -50,6 +62,25 @@ def density_jensen_shannon(
         return float(np.sum(left[mask] * np.log(left[mask] / right[mask])))
 
     return 0.5 * kl(p, midpoint) + 0.5 * kl(q, midpoint)
+
+
+def _normalize_density_bins(
+    bins: int | tuple[int, int] | None,
+    *,
+    width: int,
+    height: int,
+) -> tuple[int, int]:
+    if bins is None:
+        result = (int(width), int(height))
+    elif isinstance(bins, (int, np.integer)):
+        result = (int(bins), int(bins))
+    else:
+        if len(bins) != 2:
+            raise ValueError("density bins must be an integer or a two-item tuple")
+        result = (int(bins[0]), int(bins[1]))
+    if result[0] <= 0 or result[1] <= 0:
+        raise ValueError("density bins must be positive")
+    return result
 
 
 def dynamic_time_warping(curve_a: np.ndarray, curve_b: np.ndarray) -> float:
@@ -147,8 +178,12 @@ def _bounds_summary(
     point_oob = ~in_bounds
     trajectory_oob = np.any(point_oob, axis=1)
     return {
+        "point_count": int(point_oob.size),
+        "in_bounds_point_count": int(in_bounds.sum()),
+        "in_bounds_point_rate": float(in_bounds.mean()),
         "out_of_bounds_point_count": int(point_oob.sum()),
         "out_of_bounds_point_rate": float(point_oob.mean()),
+        "trajectory_count": len(trajectories),
         "out_of_bounds_trajectory_count": int(trajectory_oob.sum()),
         "out_of_bounds_trajectory_rate": float(trajectory_oob.mean()),
     }
@@ -160,6 +195,7 @@ def compute_baseline_metrics(
     *,
     grid_metadata: dict | None = None,
     max_pairs: int = 200,
+    density_bins: int | tuple[int, int] | None = None,
 ) -> dict[str, object]:
     """Compute density JSD plus paired DTW and continuous Fréchet distances."""
     generated = _as_trajectories(generated)
@@ -169,6 +205,11 @@ def compute_baseline_metrics(
     height = int(metadata.get("height", 200))
     coordinate_min = float(metadata.get("coordinate_min", 1))
     cell_size_km = float(metadata.get("cell_size_m", 500.0)) / 1000.0
+    normalized_density_bins = _normalize_density_bins(
+        density_bins,
+        width=width,
+        height=height,
+    )
 
     dtw_mean, dtw_median, pair_count = _paired_summary(
         generated, reference, dynamic_time_warping, max_pairs
@@ -182,6 +223,7 @@ def compute_baseline_metrics(
         width=width,
         height=height,
         coordinate_min=coordinate_min,
+        bins=normalized_density_bins,
     )
     generated_bounds = _bounds_summary(
         generated,
@@ -200,6 +242,25 @@ def compute_baseline_metrics(
         "reference_shape": list(reference.shape),
         "density_js_divergence": jsd,
         "density_js_log_base": "e",
+        "density_grid_bins": list(normalized_density_bins),
+        "density_histogram_points": {
+            "generated_total": generated_bounds["point_count"],
+            "generated_in_bounds": generated_bounds["in_bounds_point_count"],
+            "generated_excluded_out_of_bounds": generated_bounds[
+                "out_of_bounds_point_count"
+            ],
+            "generated_excluded_out_of_bounds_rate": generated_bounds[
+                "out_of_bounds_point_rate"
+            ],
+            "reference_total": reference_bounds["point_count"],
+            "reference_in_bounds": reference_bounds["in_bounds_point_count"],
+            "reference_excluded_out_of_bounds": reference_bounds[
+                "out_of_bounds_point_count"
+            ],
+            "reference_excluded_out_of_bounds_rate": reference_bounds[
+                "out_of_bounds_point_rate"
+            ],
+        },
         "paired_curve_count": pair_count,
         "dtw_mean_grid_units": dtw_mean,
         "dtw_median_grid_units": dtw_median,
@@ -221,6 +282,12 @@ def compute_baseline_metrics(
         "reference_out_of_bounds_point_rate": reference_bounds[
             "out_of_bounds_point_rate"
         ],
+        "reference_out_of_bounds_point_count": reference_bounds[
+            "out_of_bounds_point_count"
+        ],
+        "reference_out_of_bounds_trajectory_count": reference_bounds[
+            "out_of_bounds_trajectory_count"
+        ],
         "reference_out_of_bounds_trajectory_rate": reference_bounds[
             "out_of_bounds_trajectory_rate"
         ],
@@ -236,6 +303,7 @@ def compute_control_metrics(
     parameterized_reference: np.ndarray | None = None,
     grid_metadata: dict | None = None,
     max_pairs: int = 200,
+    density_bins: int | tuple[int, int] | None = None,
 ) -> dict[str, object]:
     """Compare a model with independent-real and condition-only controls."""
     generated = _as_trajectories(generated)
@@ -247,18 +315,25 @@ def compute_control_metrics(
         reference,
         grid_metadata=grid_metadata,
         max_pairs=max_pairs,
+        density_bins=density_bins,
     )
     straight_metrics = compute_baseline_metrics(
         straight_line,
         reference,
         grid_metadata=grid_metadata,
         max_pairs=max_pairs,
+        density_bins=density_bins,
     )
 
     metadata = grid_metadata or {}
     width = int(metadata.get("width", 200))
     height = int(metadata.get("height", 200))
     coordinate_min = float(metadata.get("coordinate_min", 1))
+    normalized_density_bins = _normalize_density_bins(
+        density_bins,
+        width=width,
+        height=height,
+    )
     real_control_bounds = _bounds_summary(
         real_control,
         width=width,
@@ -280,8 +355,30 @@ def compute_control_metrics(
             width=width,
             height=height,
             coordinate_min=coordinate_min,
+            bins=normalized_density_bins,
         ),
         "density_js_log_base": "e",
+        "density_grid_bins": list(normalized_density_bins),
+        "density_histogram_points": {
+            "reference_total": real_reference_bounds["point_count"],
+            "reference_in_bounds": real_reference_bounds["in_bounds_point_count"],
+            "reference_excluded_out_of_bounds": real_reference_bounds[
+                "out_of_bounds_point_count"
+            ],
+            "reference_excluded_out_of_bounds_rate": real_reference_bounds[
+                "out_of_bounds_point_rate"
+            ],
+            "independent_real_total": real_control_bounds["point_count"],
+            "independent_real_in_bounds": real_control_bounds[
+                "in_bounds_point_count"
+            ],
+            "independent_real_excluded_out_of_bounds": real_control_bounds[
+                "out_of_bounds_point_count"
+            ],
+            "independent_real_excluded_out_of_bounds_rate": real_control_bounds[
+                "out_of_bounds_point_rate"
+            ],
+        },
         "reference_out_of_bounds_point_rate": real_reference_bounds[
             "out_of_bounds_point_rate"
         ],
@@ -307,7 +404,7 @@ def compute_control_metrics(
         ),
     }
     result: dict[str, object] = {
-        "schema_version": "trajflow-control-evaluation-v1",
+        "schema_version": "trajflow-control-evaluation-v2",
         "metric_semantics": {
             "primary_reference": "paired raw test trajectories",
             "real_density_control": "an independent, disjoint test sample",
@@ -315,6 +412,7 @@ def compute_control_metrics(
                 "linear interpolation between condition-decoded origin and destination"
             ),
             "density_histogram_oob_policy": "out-of-grid points are excluded and reported separately",
+            "density_grid_bins": list(normalized_density_bins),
             "dtw": "exact accumulated Euclidean point cost",
             "continuous_frechet": "Alt-Godau continuous curve distance",
         },
@@ -328,18 +426,61 @@ def compute_control_metrics(
         "real_vs_real_density_control": real_density_control,
         "od_straight_line_vs_paired_raw_test": straight_metrics,
         "model_improvement_over_straight_line": comparison,
+        "baseline_acceptance_gate": {
+            "criterion": (
+                "model median DTW and continuous Frechet must both be strictly "
+                "lower than the same-sample O-to-D straight-line control"
+            ),
+            "passed": bool(
+                comparison["model_beats_straight_line_on_dtw_median"]
+                and comparison[
+                    "model_beats_straight_line_on_continuous_frechet_median"
+                ]
+            ),
+        },
     }
     if parameterized_reference is not None:
         parameterized_reference = _as_trajectories(parameterized_reference)
         result["array_shapes"]["parameterized_training_target"] = list(
             parameterized_reference.shape
         )
-        result["model_vs_parameterized_training_target_diagnostic"] = (
-            compute_baseline_metrics(
-                generated,
-                parameterized_reference,
-                grid_metadata=grid_metadata,
-                max_pairs=max_pairs,
-            )
+        model_vs_parameterized = compute_baseline_metrics(
+            generated,
+            parameterized_reference,
+            grid_metadata=grid_metadata,
+            max_pairs=max_pairs,
+            density_bins=density_bins,
         )
+        representation_vs_raw = compute_baseline_metrics(
+            parameterized_reference,
+            reference,
+            grid_metadata=grid_metadata,
+            max_pairs=max_pairs,
+            density_bins=density_bins,
+        )
+        result["model_vs_parameterized_training_target_diagnostic"] = (
+            model_vs_parameterized
+        )
+        result["parameterized_representation_vs_paired_raw_test"] = (
+            representation_vs_raw
+        )
+        result["representation_ceiling_comparison"] = {
+            "positive_straight_minus_representation_means_representation_is_better": True,
+            "dtw_median_km_straight_minus_representation": (
+                straight_metrics["dtw_median_km"]
+                - representation_vs_raw["dtw_median_km"]
+            ),
+            "continuous_frechet_median_km_straight_minus_representation": (
+                straight_metrics["continuous_frechet_median_km"]
+                - representation_vs_raw["continuous_frechet_median_km"]
+            ),
+            "model_gap_to_representation_dtw_median_km": (
+                model_metrics["dtw_median_km"]
+                - representation_vs_raw["dtw_median_km"]
+            ),
+            "model_gap_to_representation_continuous_frechet_median_km": (
+                model_metrics["continuous_frechet_median_km"]
+                - representation_vs_raw["continuous_frechet_median_km"]
+            ),
+        }
     return result

@@ -39,6 +39,69 @@ def distinct_control_point_counts(
     ], dtype=np.int64)
 
 
+def five_distinct_point_pattern(
+    trajectories: np.ndarray,
+    distinct_counts: np.ndarray,
+    *,
+    tolerance: float = 1e-6,
+) -> dict[str, float | int | str]:
+    """Describe the suspicious-looking five-point RDP histogram spike.
+
+    With ten evenly arc-length-spaced controls, a closed path that travels out
+    and returns along the same line naturally contains five distinct coordinates:
+    the second half mirrors the first.  Recording that pattern distinguishes it
+    from an epsilon-search fallback without changing the representation.
+    """
+    trajectories = np.asarray(trajectories, dtype=np.float64)
+    distinct_counts = np.asarray(distinct_counts, dtype=np.int64)
+    selected = trajectories[distinct_counts == 5]
+    count = len(selected)
+    if count == 0:
+        return {
+            "trajectory_count": 0,
+            "same_start_end_count": 0,
+            "palindromic_control_points_count": 0,
+            "nearly_collinear_count": 0,
+            "interpretation": "no five-distinct-point trajectories",
+        }
+
+    same_start_end = np.linalg.norm(
+        selected[:, 0] - selected[:, -1],
+        axis=1,
+    ) <= tolerance
+    palindromic = np.all(
+        np.abs(selected - selected[:, ::-1]) <= tolerance,
+        axis=(1, 2),
+    )
+    singular_value_ratios = []
+    for trajectory in selected:
+        singular_values = np.linalg.svd(
+            trajectory - trajectory.mean(axis=0),
+            compute_uv=False,
+        )
+        ratio = (
+            0.0
+            if singular_values[0] <= tolerance
+            else float(singular_values[1] / singular_values[0])
+        )
+        singular_value_ratios.append(ratio)
+    nearly_collinear = np.asarray(singular_value_ratios) <= tolerance
+    return {
+        "trajectory_count": count,
+        "same_start_end_count": int(same_start_end.sum()),
+        "same_start_end_rate": float(same_start_end.mean()),
+        "palindromic_control_points_count": int(palindromic.sum()),
+        "palindromic_control_points_rate": float(palindromic.mean()),
+        "nearly_collinear_count": int(nearly_collinear.sum()),
+        "nearly_collinear_rate": float(nearly_collinear.mean()),
+        "collinearity_singular_value_ratio_threshold": float(tolerance),
+        "interpretation": (
+            "same-origin/destination out-and-back paths create mirrored controls; "
+            "this pattern is not an epsilon-search failure"
+        ),
+    }
+
+
 def _manifest_profile(rows: list[dict[str, str]]) -> dict[str, object]:
     result: dict[str, object] = {}
     split_names = ["all", "train", "val", "test"]
@@ -92,13 +155,17 @@ def build_dataset_profile(
         unique, counts = np.unique(distinct_counts, return_counts=True)
         rdp_profile[split] = {
             "cache_file": cache_path.name,
-            "trajectory_count": int(len(trajectories)),
+            "trajectory_count": len(trajectories),
             "configured_control_points": int(control_points),
             "distinct_control_points": distribution_summary(distinct_counts),
             "distinct_control_point_histogram": {
                 str(int(value)): int(count)
                 for value, count in zip(unique, counts, strict=True)
             },
+            "five_distinct_point_pattern": five_distinct_point_pattern(
+                trajectories,
+                distinct_counts,
+            ),
         }
 
     dataset_summary_path = processed_dir / "dataset_summary.json"
@@ -116,6 +183,10 @@ def build_dataset_profile(
             "distinct_control_points": (
                 "unique RDP coordinates after rounding to 6 decimals; this detects "
                 "duplicates, not geometric collinearity"
+            ),
+            "five_distinct_point_pattern": (
+                "ten evenly spaced controls can have five distinct coordinates when "
+                "a same-origin/destination path travels out and returns along the same line"
             ),
         },
     }

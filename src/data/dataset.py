@@ -8,6 +8,7 @@ from tqdm import tqdm
 
 import src.utils.jismesh_v2.jismesh.utils as ju_v2
 from src.data.transforms import point2para
+from src.data.validation import summarize_parameterized_targets
 
 
 def map_two_columns_to_shared_range(input_array):
@@ -135,6 +136,10 @@ class FlowMatchingDataset(Dataset):
             self._prepare_conditions()
 
         if config['data']['parametrized']:
+            parameterization_source = np.asarray(self.traj_segments)
+            source_has_movement = bool(
+                np.any(np.ptp(parameterization_source, axis=1) > 1e-8)
+            )
             # Reuse cached parameterized trajectories when available.
             if self.split_indices_path is None:
                 cache_dir = os.path.dirname(self.input_folder)
@@ -192,6 +197,20 @@ class FlowMatchingDataset(Dataset):
                     np.save(processed_data_path, self.coffs)
             else:
                 print(f"Skipping saving coefficients (partial dataset with {self.dataset_size} samples)")
+            self.parameterized_target_summary = summarize_parameterized_targets(
+                self.traj_segments,
+                configured_control_points=int(config['data']['parametrized_M']),
+                source_has_movement=source_has_movement,
+            )
+            distinct = self.parameterized_target_summary[
+                'distinct_control_points'
+            ]
+            print(
+                "Parameterized target preflight passed: "
+                f"shape={tuple(self.traj_segments.shape)}, "
+                f"distinct_points_p10/p50/p90="
+                f"{distinct['p10']:.0f}/{distinct['p50']:.0f}/{distinct['p90']:.0f}"
+            )
         else:
             pass
 

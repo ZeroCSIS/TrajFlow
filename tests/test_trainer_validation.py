@@ -39,6 +39,7 @@ class TrainerValidationTest(unittest.TestCase):
                 "num_epochs": 1,
                 "print_every": 1,
                 "save_every": 1,
+                "checkpoint_policy": "best_and_last",
                 "viz_bool": False,
                 "validation_seed": 123,
                 "early_stop_patience": 2,
@@ -78,8 +79,15 @@ class TrainerValidationTest(unittest.TestCase):
                 (save_dir / "loss_history.json").read_text(encoding="utf-8")
             )
             self.assertEqual(history["selection_metric"], "validation_loss")
+            self.assertEqual(history["checkpoint_policy"], "best_and_last")
             best_model = root / "models" / "run" / "best_model.pt"
             self.assertTrue(best_model.exists())
+            self.assertTrue((root / "models" / "run" / "last_model.pt").exists())
+            self.assertFalse((root / "models" / "run" / "final_model.pt").exists())
+            self.assertEqual(
+                list((root / "models" / "run").glob("checkpoint_epoch_*.pt")),
+                [],
+            )
 
 
 class _TensorOnlyDataset(torch.utils.data.Dataset):

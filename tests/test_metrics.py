@@ -34,6 +34,20 @@ class BaselineMetricsTest(unittest.TestCase):
             math.log(2.0),
         )
 
+    def test_density_can_use_coarser_bins_without_changing_domain(self):
+        generated = np.asarray([[[1.0, 1.0], [1.0, 1.0]]])
+        reference = np.asarray([[[2.0, 2.0], [2.0, 2.0]]])
+        self.assertAlmostEqual(
+            density_jensen_shannon(
+                generated,
+                reference,
+                width=4,
+                height=4,
+                bins=1,
+            ),
+            0.0,
+        )
+
     def test_metric_bundle_uses_grid_scale(self):
         curves = np.asarray([[[1.0, 1.0], [2.0, 2.0], [3.0, 2.0]]])
         metrics = compute_baseline_metrics(
@@ -66,6 +80,12 @@ class BaselineMetricsTest(unittest.TestCase):
         self.assertAlmostEqual(
             metrics["generated_out_of_bounds_trajectory_rate"], 0.5
         )
+        histogram_points = metrics["density_histogram_points"]
+        self.assertEqual(histogram_points["generated_total"], 6)
+        self.assertEqual(histogram_points["generated_in_bounds"], 5)
+        self.assertEqual(
+            histogram_points["generated_excluded_out_of_bounds"], 1
+        )
 
     def test_control_bundle_compares_model_with_condition_only_line(self):
         reference = np.asarray([
@@ -84,8 +104,10 @@ class BaselineMetricsTest(unittest.TestCase):
             reference,
             reference,
             real_control,
+            parameterized_reference=reference,
             grid_metadata={"width": 10, "height": 10, "cell_size_m": 500},
             max_pairs=2,
+            density_bins=5,
         )
         self.assertEqual(
             metrics["array_shapes"]["od_straight_line_control"], [2, 3, 2]
@@ -97,6 +119,20 @@ class BaselineMetricsTest(unittest.TestCase):
         )
         self.assertGreater(
             metrics["od_straight_line_vs_paired_raw_test"]["dtw_median_km"],
+            0.0,
+        )
+        self.assertEqual(metrics["metric_semantics"]["density_grid_bins"], [5, 5])
+        self.assertTrue(metrics["baseline_acceptance_gate"]["passed"])
+        self.assertAlmostEqual(
+            metrics["parameterized_representation_vs_paired_raw_test"][
+                "continuous_frechet_median_km"
+            ],
+            0.0,
+        )
+        self.assertGreater(
+            metrics["representation_ceiling_comparison"][
+                "continuous_frechet_median_km_straight_minus_representation"
+            ],
             0.0,
         )
 

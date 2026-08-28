@@ -7,7 +7,7 @@ from pathlib import Path
 
 import numpy as np
 
-from data_utils.profile_yjmob import build_dataset_profile
+from data_utils.profile_yjmob import build_dataset_profile, five_distinct_point_pattern
 
 
 class YJMobProfileTest(unittest.TestCase):
@@ -76,6 +76,24 @@ class YJMobProfileTest(unittest.TestCase):
                 ],
                 {"2": 1, "3": 1},
             )
+            self.assertEqual(
+                profile["rdp_control_point_statistics"]["test"][
+                    "five_distinct_point_pattern"
+                ]["trajectory_count"],
+                0,
+            )
+
+    def test_five_point_spike_identifies_out_and_back_pattern(self):
+        outward = np.column_stack([np.arange(5, dtype=float), np.zeros(5)])
+        trajectory = np.concatenate([outward, outward[::-1]], axis=0)
+        summary = five_distinct_point_pattern(
+            trajectory[None, ...],
+            np.asarray([5]),
+        )
+        self.assertEqual(summary["trajectory_count"], 1)
+        self.assertEqual(summary["same_start_end_rate"], 1.0)
+        self.assertEqual(summary["palindromic_control_points_rate"], 1.0)
+        self.assertEqual(summary["nearly_collinear_rate"], 1.0)
 
 
 if __name__ == "__main__":

@@ -349,7 +349,17 @@ class FlowMatchingTrainer:
         """Train the model"""
         num_epochs = self.config['training']['num_epochs']
         print_every = self.config['training']['print_every']
-        save_every = self.config['training']['save_every']
+        save_every = int(self.config['training']['save_every'])
+        checkpoint_policy = self.config['training'].get(
+            'checkpoint_policy',
+            'periodic',
+        )
+        if checkpoint_policy not in {'periodic', 'best_and_last'}:
+            raise ValueError(
+                "training.checkpoint_policy must be 'periodic' or 'best_and_last'"
+            )
+        if save_every <= 0:
+            raise ValueError("training.save_every must be positive")
         is_conditional = self.config['condition']['enabled']
 
         total_iterations = num_epochs * len(self.dataloader)
@@ -426,6 +436,7 @@ class FlowMatchingTrainer:
                             'validation_loss' if self.validation_dataloader is not None
                             else 'train_loss'
                         ),
+                        'checkpoint_policy': checkpoint_policy,
                     },
                     f,
                     indent=2,
@@ -447,16 +458,26 @@ class FlowMatchingTrainer:
                     print(f"Early stopping triggered after {epoch + 1} epochs")
                     break
 
-            # Regular checkpoint saving
-            if epoch % save_every == 0 or epoch == num_epochs - 1:
+            # Periodic checkpoints remain available for legacy experiments.  The
+            # bounded YJMob baseline uses best_and_last to avoid duplicating a
+            # ~680 MB checkpoint at every reporting interval.
+            periodic_due = epoch % save_every == 0 or epoch == num_epochs - 1
+            if checkpoint_policy == 'periodic' and periodic_due:
                 self.save_checkpoint(os.path.join(self.model_dir, f'checkpoint_epoch_{epoch}.pt'))
 
-                # Generate visualizations
-                if self.config['training']['viz_bool']:
-                    self.inference_and_visualize(epoch, vis_dir,1, is_conditional)
+            # Generate visualizations on the existing cadence independent of the
+            # checkpoint retention policy.
+            if periodic_due and self.config['training']['viz_bool']:
+                self.inference_and_visualize(epoch, vis_dir,1, is_conditional)
 
-        # Final checkpoint
-        self.save_checkpoint(os.path.join(self.model_dir, 'final_model.pt'))
+        # best_and_last intentionally emits exactly the selection checkpoint and
+        # the terminal optimizer state.  Legacy runs keep final_model.pt.
+        final_name = (
+            'last_model.pt'
+            if checkpoint_policy == 'best_and_last'
+            else 'final_model.pt'
+        )
+        self.save_checkpoint(os.path.join(self.model_dir, final_name))
         print(f"Training completed. Final loss: {train_losses[-1]:.6f}")
 
         return train_losses

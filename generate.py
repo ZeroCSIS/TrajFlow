@@ -505,13 +505,17 @@ def generate_trajectories(model, all_gt_data, all_head, lengths, traj_mean, traj
         )
     else:
         representation_note = "direct point representation"
+    density_bins = int(evaluation_config.get('density_bins', 100))
     visualize_trajectories(total_gen_trajs, paired_raw_reference,
                            config['data']['trajectory_length'],
                            parametrized=False, save_folder=save_dir,
-                           representation_note=representation_note)
+                           representation_note=representation_note,
+                           grid_metadata=dataset.grid_metadata)
     visualize_density_comparison(total_gen_trajs, paired_raw_reference,
                                  config['data']['trajectory_length'],
-                                 save_dir)
+                                 save_dir,
+                                 grid_metadata=dataset.grid_metadata,
+                                 density_bins=density_bins)
 
     # Save trajectories separately
     save_trajectories_to_csv(
@@ -587,6 +591,7 @@ def generate_trajectories(model, all_gt_data, all_head, lengths, traj_mean, traj
             parameterized_reference=np.asarray(total_gt_trajs),
             grid_metadata=dataset.grid_metadata,
             max_pairs=int(evaluation_config.get('max_curve_pairs', 200)),
+            density_bins=density_bins,
         )
         metrics_path = os.path.join(save_dir, 'baseline_metrics.json')
         with open(metrics_path, 'w', encoding='utf-8') as stream:

@@ -10,8 +10,11 @@ import numpy as np
 
 from data_utils.analyze_yjmob_habits import (
     build_habit_profile,
+    daily_non_dominant_observation_mask,
     load_observation_cube,
     missingness_profile,
+    observed_segment_profile,
+    observed_transition_arrival_mask,
     read_manifest_users,
     shuffle_timeslots_within_user_days,
     temporal_holdout_metrics,
@@ -93,6 +96,55 @@ class YJMobHabitAnalysisTest(unittest.TestCase):
             2,
         )
 
+    def test_slice_masks_and_segments_never_bridge_missing_slots(self):
+        cube = np.full((1, 2, 8), -1, dtype=np.int32)
+        cube[0, 0, [0, 1, 2, 4, 5, 7]] = [10, 10, 20, 20, 20, 30]
+        day_mask = np.asarray([True, False])
+
+        transition_mask = observed_transition_arrival_mask(cube, day_mask)
+        np.testing.assert_array_equal(
+            np.flatnonzero(transition_mask[0, 0]),
+            np.asarray([2]),
+        )
+        away_mask = daily_non_dominant_observation_mask(cube, day_mask)
+        np.testing.assert_array_equal(
+            np.flatnonzero(away_mask[0, 0]),
+            np.asarray([0, 1, 7]),
+        )
+
+        profile = observed_segment_profile(cube, day_mask)
+        per_day = profile["per_observed_user_day"]
+        self.assertEqual(per_day["observed_fragment_count"]["p50"], 3.0)
+        self.assertEqual(per_day["observed_location_run_count"]["p50"], 4.0)
+        self.assertEqual(
+            per_day["confirmed_stay_segment_count"]["p50"],
+            2.0,
+        )
+        self.assertEqual(
+            per_day["confirmed_adjacent_transition_count"]["p50"],
+            1.0,
+        )
+        self.assertEqual(
+            profile["internal_gap_boundary_classes"]["same_cell_count"],
+            1,
+        )
+        self.assertEqual(
+            profile["internal_gap_boundary_classes"]["different_cell_count"],
+            1,
+        )
+        self.assertEqual(
+            profile["adjacent_observed_edge_composition"]["total_count"],
+            3,
+        )
+        self.assertAlmostEqual(
+            profile["adjacent_observed_edge_composition"]["different_cell_rate"],
+            1 / 3,
+        )
+        self.assertEqual(
+            profile["observed_location_run_composition"]["singleton_rate"],
+            0.5,
+        )
+
     def test_build_profile_cross_checks_manifest_without_calendar_claim(self):
         cube, users = self.stable_fixture()
         profile, rows = build_habit_profile(
@@ -115,6 +167,35 @@ class YJMobHabitAnalysisTest(unittest.TestCase):
                 "null_repeat_count"
             ],
             3,
+        )
+        self.assertEqual(
+            profile["schema_version"],
+            "yjmob-longitudinal-habit-profile-v2",
+        )
+        self.assertIn("timing_gain_slices", profile)
+        self.assertIn("observed_stay_transition_segmentation", profile)
+        self.assertIn(
+            "generation",
+            profile["consistency_fingerprint"]["metric_role"],
+        )
+
+    def test_holdout_slice_restricts_held_out_observations(self):
+        cube, _ = self.stable_fixture()
+        train = np.asarray([True] * 4 + [False] * 4)
+        test = ~train
+        selected = np.zeros(cube.shape, dtype=bool)
+        selected[:, :, 0] = True
+        metrics = temporal_holdout_metrics(
+            cube,
+            train,
+            test,
+            min_train_observations=3,
+            test_observation_mask=selected,
+        )
+        self.assertEqual(metrics["held_out_observations"], 8)
+        self.assertEqual(
+            metrics["held_out_raw_observations_selected_before_eligibility"],
+            8,
         )
 
     def test_raw_loader_uses_exact_manifest_cohort(self):

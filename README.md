@@ -127,6 +127,24 @@ deterministic O-to-D line control, and separate point/trajectory OOB rates.
 Best-of-K is an oracle coverage diagnostic: increasing K can improve it by
 construction, so it is not a training or model-selection gate.
 
+Freeze a completed best-of-K run into the baseline scorecard and explicit
+same-origin/destination acceptance set without rerunning the model:
+
+```bash
+python data_utils/build_yjmob_baseline_scorecard.py \
+  --metrics /path/to/best_of_k_metrics.json \
+  --manifest /path/to/generation_manifest.json \
+  --candidates /path/to/best_of_k_candidates.npz \
+  --output-dir outputs_yjmob_closeout/ \
+  --workers 4
+```
+
+The builder verifies the input checksum and selected condition indices,
+recomputes the per-condition O-to-D line distances, reconciles aggregate
+medians/OOB counts, reports K-prefix diagnostics, and writes every O=D case to
+`same_od_acceptance_set.csv`. The set is a structural diagnostic for future
+representations, not a new training gate.
+
 The raw-data habit profiler uses the exact user cohort retained in a prepared
 manifest and never uses the 120-point interpolation:
 
@@ -142,11 +160,21 @@ python data_utils/analyze_yjmob_habits.py \
 It reports raw-slot coverage and internal gaps, per-user/per-timeslot modal-cell
 rates, chronological holdout accuracy against a population-timeslot control,
 lagged cross-day similarity, and a null that shuffles locations only among each
-user-day's observed timeslots. The official data descriptor defines `d` as a
-masked date and does not publish its civil-date mapping. Consequently, the
-profiler reports all seven `d % 7` offsets and an explicitly inferred
-"weekend-like" low-activity phase pair; it never assigns civil weekday names or
-attempts to reverse-engineer the hidden calendar.
+user-day's observed timeslots. It also writes a consistency fingerprint for all
+observations, confirmed adjacent transition arrivals, and observations away
+from the user-day's modal cell. For generation, these real-data rates are
+targets to match rather than values to maximize; substantially higher rates can
+mean synthetic-person diversity has collapsed.
+
+The stay/transition profile is deliberately conservative: a transition needs
+two adjacent raw half-hour slots at different cells, a confirmed stay needs at
+least two adjacent pings at one cell, and every missing slot terminates the
+segment. Gaps bounded by the same or different cells are counted separately but
+remain unassigned. The official data descriptor defines `d` as a masked date
+and does not publish its civil-date mapping. Consequently, the profiler reports
+all seven `d % 7` offsets and an explicitly inferred "weekend-like"
+low-activity phase pair; it never assigns civil weekday names or attempts to
+reverse-engineer the hidden calendar.
 
 Training:
 ```bash

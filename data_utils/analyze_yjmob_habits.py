@@ -13,6 +13,7 @@ import argparse
 import csv
 import json
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
@@ -288,10 +289,23 @@ def temporal_holdout_metrics(
     min_test_observations: int = 1,
     grid_height: int = 200,
     cell_size_km: float = 0.5,
+    test_observation_mask: np.ndarray | None = None,
 ) -> dict[str, object]:
     cube = np.asarray(cube)
     train = cube[:, np.asarray(train_day_mask, dtype=bool), :]
-    test = cube[:, np.asarray(test_day_mask, dtype=bool), :]
+    normalized_test_day_mask = np.asarray(test_day_mask, dtype=bool)
+    test = cube[:, normalized_test_day_mask, :]
+    if test_observation_mask is None:
+        selected_test_observations = np.ones(test.shape, dtype=bool)
+    else:
+        test_observation_mask = np.asarray(test_observation_mask, dtype=bool)
+        if test_observation_mask.shape != cube.shape:
+            raise ValueError(
+                "test observation mask must have the same shape as the cube"
+            )
+        selected_test_observations = test_observation_mask[
+            :, normalized_test_day_mask, :
+        ]
     population_modes: list[int | None] = []
     for timeslot in range(cube.shape[2]):
         values = train[:, :, timeslot].ravel()
@@ -313,7 +327,10 @@ def temporal_holdout_metrics(
             train_values = train[user_index, :, timeslot]
             train_values = train_values[train_values >= 0]
             test_values = test[user_index, :, timeslot]
-            test_values = test_values[test_values >= 0]
+            test_values = test_values[
+                (test_values >= 0)
+                & selected_test_observations[user_index, :, timeslot]
+            ]
             if (
                 len(train_values) < min_train_observations
                 or len(test_values) < min_test_observations
@@ -368,6 +385,9 @@ def temporal_holdout_metrics(
         "eligible_user_slots": eligible_user_slots,
         "eligible_users": int(valid_users.sum()),
         "held_out_observations": int(test_count),
+        "held_out_raw_observations_selected_before_eligibility": int(
+            ((test >= 0) & selected_test_observations).sum()
+        ),
         "personalized_top1_exact_hit_rate": personal_rate,
         "population_timeslot_top1_exact_hit_rate": population_rate,
         "personalized_minus_population_exact_hit_rate": (
@@ -413,6 +433,9 @@ def shuffled_null_profile(
     repeats: int,
     seed: int,
     min_train_observations: int,
+    test_observation_mask: np.ndarray | None = None,
+    null_test_mask_builder: Callable[[np.ndarray], np.ndarray] | None = None,
+    null_semantics: str | None = None,
 ) -> dict[str, object]:
     if repeats <= 0:
         raise ValueError("null repeats must be positive")
@@ -421,23 +444,32 @@ def shuffled_null_profile(
         train_day_mask,
         test_day_mask,
         min_train_observations=min_train_observations,
+        test_observation_mask=test_observation_mask,
     )
     observed_rate = observed["personalized_top1_exact_hit_rate"]
     null_rates: list[float] = []
     null_advantages: list[float] = []
+    null_held_out_observations: list[int] = []
     for repeat in range(repeats):
         shuffled = shuffle_timeslots_within_user_days(cube, seed + repeat)
+        null_test_mask = (
+            null_test_mask_builder(shuffled)
+            if null_test_mask_builder is not None
+            else test_observation_mask
+        )
         metrics = temporal_holdout_metrics(
             shuffled,
             train_day_mask,
             test_day_mask,
             min_train_observations=min_train_observations,
+            test_observation_mask=null_test_mask,
         )
         if metrics["personalized_top1_exact_hit_rate"] is not None:
             null_rates.append(float(metrics["personalized_top1_exact_hit_rate"]))
             null_advantages.append(float(
                 metrics["personalized_minus_population_exact_hit_rate"]
             ))
+            null_held_out_observations.append(int(metrics["held_out_observations"]))
     if observed_rate is None or not null_rates:
         comparison = None
     else:
@@ -461,12 +493,320 @@ def shuffled_null_profile(
         "null_personalized_minus_population_exact_hit_rate": _safe_distribution(
             null_advantages
         ),
+        "null_held_out_observations": _safe_distribution(
+            null_held_out_observations
+        ),
         "comparison": comparison,
         "null_semantics": (
-            "locations are randomly permuted only among each user-day's observed "
+            null_semantics
+            or "locations are randomly permuted only among each user-day's observed "
             "timeslots, preserving the observation mask and daily location multiset "
             "while destroying absolute-time assignment"
         ),
+    }
+
+
+def daily_non_dominant_observation_mask(
+    cube: np.ndarray,
+    day_mask: np.ndarray,
+) -> np.ndarray:
+    """Select raw pings away from each user-day's observed modal cell.
+
+    The smallest cell id breaks a tie, matching the profiler's other modal-cell
+    estimates and making the selection deterministic.
+    """
+    cube = np.asarray(cube)
+    day_mask = np.asarray(day_mask, dtype=bool)
+    if day_mask.shape != (cube.shape[1],):
+        raise ValueError("day mask length must match the cube")
+    selected = np.zeros(cube.shape, dtype=bool)
+    for user_index, day_index in np.ndindex(cube.shape[:2]):
+        if not day_mask[day_index]:
+            continue
+        values = cube[user_index, day_index]
+        observed_slots = np.flatnonzero(values >= 0)
+        if not len(observed_slots):
+            continue
+        dominant_cell, _ = _mode(values[observed_slots])
+        selected[user_index, day_index, observed_slots] = (
+            values[observed_slots] != dominant_cell
+        )
+    return selected
+
+
+def observed_transition_arrival_mask(
+    cube: np.ndarray,
+    day_mask: np.ndarray,
+) -> np.ndarray:
+    """Select arrivals whose immediately previous raw slot is a different cell."""
+    cube = np.asarray(cube)
+    day_mask = np.asarray(day_mask, dtype=bool)
+    if day_mask.shape != (cube.shape[1],):
+        raise ValueError("day mask length must match the cube")
+    selected = np.zeros(cube.shape, dtype=bool)
+    observed_adjacent = (cube[:, :, :-1] >= 0) & (cube[:, :, 1:] >= 0)
+    changed = observed_adjacent & (cube[:, :, :-1] != cube[:, :, 1:])
+    selected[:, :, 1:] = changed
+    selected[:, ~day_mask, :] = False
+    return selected
+
+
+def timing_slice_profiles(
+    cube: np.ndarray,
+    train_day_mask: np.ndarray,
+    test_day_mask: np.ndarray,
+    *,
+    repeats: int,
+    seed: int,
+    min_train_observations: int,
+) -> dict[str, object]:
+    """Measure absolute-time gain where routine timing is most informative."""
+    transition_mask = observed_transition_arrival_mask(cube, test_day_mask)
+    away_mask = daily_non_dominant_observation_mask(cube, test_day_mask)
+    transition_profile = shuffled_null_profile(
+        cube,
+        train_day_mask,
+        test_day_mask,
+        repeats=repeats,
+        seed=seed,
+        min_train_observations=min_train_observations,
+        test_observation_mask=transition_mask,
+        null_semantics=(
+            "the real transition-arrival timestamps are held fixed while each "
+            "user-day's observed locations are shuffled; the slice diagnoses "
+            "absolute-time assignment at confirmed adjacent raw transitions"
+        ),
+    )
+    away_profile = shuffled_null_profile(
+        cube,
+        train_day_mask,
+        test_day_mask,
+        repeats=repeats,
+        seed=seed,
+        min_train_observations=min_train_observations,
+        test_observation_mask=away_mask,
+        null_test_mask_builder=lambda shuffled: daily_non_dominant_observation_mask(
+            shuffled,
+            test_day_mask,
+        ),
+        null_semantics=(
+            "locations are shuffled within each user-day and the non-dominant "
+            "slice is recomputed; this preserves each day's observation mask and "
+            "location multiset while randomizing when away locations occur"
+        ),
+    )
+    return {
+        "observed_adjacent_transition_arrivals": transition_profile,
+        "away_from_user_day_observed_dominant_cell": away_profile,
+        "slice_definitions": {
+            "observed_adjacent_transition_arrivals": (
+                "slot t is selected only when raw slots t-1 and t are both "
+                "observed and contain different cells; no gap is bridged"
+            ),
+            "away_from_user_day_observed_dominant_cell": (
+                "a raw ping is selected when its cell differs from the deterministic "
+                "modal cell among that user-day's observed pings; the smallest cell "
+                "id breaks a modal-count tie"
+            ),
+        },
+    }
+
+
+def observed_segment_profile(
+    cube: np.ndarray,
+    day_mask: np.ndarray,
+    *,
+    grid_height: int = 200,
+    cell_size_km: float = 0.5,
+) -> dict[str, object]:
+    """Profile only segments and transitions directly supported by raw pings."""
+    cube = np.asarray(cube)
+    day_mask = np.asarray(day_mask, dtype=bool)
+    if day_mask.shape != (cube.shape[1],):
+        raise ValueError("day mask length must match the cube")
+
+    day_rows: list[dict[str, int]] = []
+    location_run_lengths: list[int] = []
+    confirmed_stay_lengths: list[int] = []
+    transition_step_distances: list[float] = []
+    internal_gap_lengths: list[int] = []
+    same_cell_gap_lengths: list[int] = []
+    different_cell_gap_lengths: list[int] = []
+
+    for user_index, day_index in np.ndindex(cube.shape[:2]):
+        if not day_mask[day_index]:
+            continue
+        day_values = cube[user_index, day_index]
+        slots = np.flatnonzero(day_values >= 0)
+        if not len(slots):
+            continue
+        values = day_values[slots]
+        fragment_count = 1
+        transition_count = 0
+        gap_count = 0
+        same_gap_count = 0
+        different_gap_count = 0
+        run_start = 0
+        day_run_lengths: list[int] = []
+
+        for index in range(1, len(slots)):
+            slot_delta = int(slots[index] - slots[index - 1])
+            adjacent = slot_delta == 1
+            same_cell = int(values[index]) == int(values[index - 1])
+            if adjacent and not same_cell:
+                transition_count += 1
+                transition_step_distances.extend(
+                    _cell_distance_km(
+                        np.asarray([values[index - 1]]),
+                        int(values[index]),
+                        grid_height,
+                        cell_size_km,
+                    ).tolist()
+                )
+            elif not adjacent:
+                fragment_count += 1
+                gap_length = slot_delta - 1
+                gap_count += 1
+                internal_gap_lengths.append(gap_length)
+                if same_cell:
+                    same_gap_count += 1
+                    same_cell_gap_lengths.append(gap_length)
+                else:
+                    different_gap_count += 1
+                    different_cell_gap_lengths.append(gap_length)
+
+            if not (adjacent and same_cell):
+                day_run_lengths.append(index - run_start)
+                run_start = index
+        day_run_lengths.append(len(slots) - run_start)
+        location_run_lengths.extend(day_run_lengths)
+        day_stay_lengths = [length for length in day_run_lengths if length >= 2]
+        confirmed_stay_lengths.extend(day_stay_lengths)
+        singleton_count = sum(length == 1 for length in day_run_lengths)
+        day_rows.append({
+            "observed_ping_count": int(len(slots)),
+            "observed_fragment_count": int(fragment_count),
+            "observed_location_run_count": int(len(day_run_lengths)),
+            "confirmed_stay_segment_count": int(len(day_stay_lengths)),
+            "singleton_location_run_count": int(singleton_count),
+            "confirmed_adjacent_transition_count": int(transition_count),
+            "unassigned_internal_gap_count": int(gap_count),
+            "same_cell_bounded_gap_count": int(same_gap_count),
+            "different_cell_bounded_gap_count": int(different_gap_count),
+        })
+
+    eligible_rows = [
+        row for row in day_rows if row["observed_ping_count"] >= 2
+    ]
+
+    def summarize_day_rows(rows: list[dict[str, int]]) -> dict[str, object]:
+        if not rows:
+            return {}
+        return {
+            key: _safe_distribution([row[key] for row in rows])
+            for key in rows[0]
+        }
+
+    observed_day_count = len(day_rows)
+    confirmed_transition_days = sum(
+        row["confirmed_adjacent_transition_count"] > 0 for row in day_rows
+    )
+    internal_gap_days = sum(
+        row["unassigned_internal_gap_count"] > 0 for row in day_rows
+    )
+    singleton_run_count = sum(length == 1 for length in location_run_lengths)
+    same_cell_adjacent_edge_count = sum(
+        max(0, length - 1) for length in location_run_lengths
+    )
+    different_cell_adjacent_edge_count = len(transition_step_distances)
+    adjacent_edge_count = (
+        same_cell_adjacent_edge_count + different_cell_adjacent_edge_count
+    )
+    return {
+        "observed_user_day_count": observed_day_count,
+        "converter_eligible_user_day_count": len(eligible_rows),
+        "per_observed_user_day": summarize_day_rows(day_rows),
+        "per_converter_eligible_user_day": summarize_day_rows(eligible_rows),
+        "observed_location_run_length_slots": _safe_distribution(
+            location_run_lengths
+        ),
+        "confirmed_stay_segment_length_slots": _safe_distribution(
+            confirmed_stay_lengths
+        ),
+        "confirmed_stay_segment_length_hours": _safe_distribution(
+            np.asarray(confirmed_stay_lengths, dtype=np.float64) * 0.5
+        ),
+        "confirmed_adjacent_transition_step_distance_km": _safe_distribution(
+            transition_step_distances
+        ),
+        "adjacent_observed_edge_composition": {
+            "total_count": adjacent_edge_count,
+            "same_cell_count": same_cell_adjacent_edge_count,
+            "same_cell_rate": (
+                float(same_cell_adjacent_edge_count / adjacent_edge_count)
+                if adjacent_edge_count else None
+            ),
+            "different_cell_count": different_cell_adjacent_edge_count,
+            "different_cell_rate": (
+                float(different_cell_adjacent_edge_count / adjacent_edge_count)
+                if adjacent_edge_count else None
+            ),
+        },
+        "observed_location_run_composition": {
+            "total_count": len(location_run_lengths),
+            "singleton_count": singleton_run_count,
+            "singleton_rate": (
+                float(singleton_run_count / len(location_run_lengths))
+                if location_run_lengths else None
+            ),
+            "confirmed_stay_count": len(confirmed_stay_lengths),
+            "confirmed_stay_rate": (
+                float(len(confirmed_stay_lengths) / len(location_run_lengths))
+                if location_run_lengths else None
+            ),
+        },
+        "internal_unobserved_gap_length_slots": _safe_distribution(
+            internal_gap_lengths
+        ),
+        "internal_gap_boundary_classes": {
+            "same_cell_count": len(same_cell_gap_lengths),
+            "different_cell_count": len(different_cell_gap_lengths),
+            "same_cell_gap_length_slots": _safe_distribution(
+                same_cell_gap_lengths
+            ),
+            "different_cell_gap_length_slots": _safe_distribution(
+                different_cell_gap_lengths
+            ),
+        },
+        "observed_user_day_rate_with_confirmed_adjacent_transition": (
+            float(confirmed_transition_days / observed_day_count)
+            if observed_day_count else None
+        ),
+        "observed_user_day_rate_with_unassigned_internal_gap": (
+            float(internal_gap_days / observed_day_count)
+            if observed_day_count else None
+        ),
+        "segment_semantics": {
+            "observed_fragment": (
+                "a maximal sequence of raw pings in consecutive 30-minute slots; "
+                "every missing slot breaks the fragment"
+            ),
+            "observed_location_run": (
+                "a maximal consecutive-slot run at one cell; runs never bridge a gap"
+            ),
+            "confirmed_stay_segment": (
+                "an observed location run with at least two consecutive raw pings"
+            ),
+            "confirmed_adjacent_transition": (
+                "two consecutive raw slots at different cells; transitions across "
+                "missing slots are not asserted"
+            ),
+            "gap_assignment_policy": (
+                "internal gaps remain unassigned; same-cell boundaries are only "
+                "possible unobserved stays and different-cell boundaries have "
+                "unknown transition timing"
+            ),
+        },
     }
 
 
@@ -595,6 +935,32 @@ def weekly_phase_profile(
     }
 
 
+def _fingerprint_target(null_profile: dict[str, object]) -> dict[str, object]:
+    observed = null_profile["observed_chronological_holdout"]
+    null_rates = null_profile["null_personalized_top1_exact_hit_rate"]
+    comparison = null_profile["comparison"]
+    return {
+        "held_out_observations": observed["held_out_observations"],
+        "personalized_timeslot_top1_exact_hit_rate": observed[
+            "personalized_top1_exact_hit_rate"
+        ],
+        "population_timeslot_top1_exact_hit_rate": observed[
+            "population_timeslot_top1_exact_hit_rate"
+        ],
+        "daily_location_multiset_preserving_null_mean_exact_hit_rate": (
+            null_rates["mean"] if null_rates else None
+        ),
+        "absolute_time_assignment_gain_over_null": (
+            comparison["observed_minus_null_mean_exact_hit_rate"]
+            if comparison else None
+        ),
+        "null_empirical_one_sided_p_value": (
+            comparison["empirical_one_sided_p_value"]
+            if comparison else None
+        ),
+    }
+
+
 def build_habit_profile(
     cube: np.ndarray,
     users: np.ndarray,
@@ -636,6 +1002,16 @@ def build_habit_profile(
         seed=seed,
         min_train_observations=min_train_observations,
     )
+    timing_slices = timing_slice_profiles(
+        cube,
+        train_day_mask,
+        test_day_mask,
+        repeats=null_repeats,
+        seed=seed,
+        min_train_observations=min_train_observations,
+    )
+    lagged_similarity = lagged_self_similarity(cube, day_mask)
+    segments = observed_segment_profile(cube, day_mask)
     observed_holdout = null["observed_chronological_holdout"]
     null_comparison = null["comparison"]
     personalized_advantage = observed_holdout[
@@ -648,7 +1024,7 @@ def build_habit_profile(
         and null_comparison["observed_exceeds_null_p95"]
     )
     profile = {
-        "schema_version": "yjmob-longitudinal-habit-profile-v1",
+        "schema_version": "yjmob-longitudinal-habit-profile-v2",
         "analysis_scope": {
             "cohort_user_count": len(users),
             "manifest_user_day_sample_count": int(manifest_sample_count),
@@ -660,10 +1036,9 @@ def build_habit_profile(
         "missingness_and_interpolation_exposure": missingness,
         "per_user_timeslot_stability": stability,
         "chronological_holdout_and_shuffled_null": null,
-        "lagged_cross_day_self_similarity": lagged_self_similarity(
-            cube,
-            day_mask,
-        ),
+        "timing_gain_slices": timing_slices,
+        "observed_stay_transition_segmentation": segments,
+        "lagged_cross_day_self_similarity": lagged_similarity,
         "weekly_phase_analysis": weekly_phase_profile(
             cube,
             day_mask,
@@ -679,6 +1054,44 @@ def build_habit_profile(
             "stable_personal_time_slot_habit_signal_detected": habit_signal_detected,
             "not_a_causal_or_identity_reidentification_claim": True,
         },
+        "consistency_fingerprint": {
+            "metric_role": {
+                "prediction": (
+                    "the real-data rates are zero-model references to exceed when "
+                    "the task is future-location prediction"
+                ),
+                "generation": (
+                    "synthetic-person rates should match the real-data fingerprint, "
+                    "not maximize it; substantially higher consistency can indicate "
+                    "diversity collapse"
+                ),
+            },
+            "raw_reference_targets": {
+                "all_observed_slots": _fingerprint_target(null),
+                "observed_adjacent_transition_arrivals": _fingerprint_target(
+                    timing_slices["observed_adjacent_transition_arrivals"]
+                ),
+                "away_from_user_day_observed_dominant_cell": _fingerprint_target(
+                    timing_slices[
+                        "away_from_user_day_observed_dominant_cell"
+                    ]
+                ),
+                "lagged_exact_same_cell_rate": [
+                    {
+                        "day_lag": row["day_lag"],
+                        "overlapping_observed_slots": row[
+                            "overlapping_observed_slots"
+                        ],
+                        "exact_same_cell_rate": row["exact_same_cell_rate"],
+                    }
+                    for row in lagged_similarity
+                ],
+            },
+            "scope_warning": (
+                "these targets describe raw observed slots in this fixed cohort; "
+                "they are not civil-weekday claims and do not validate a model"
+            ),
+        },
         "conversion_cross_check": {
             "raw_user_days_with_at_least_two_observations": missingness[
                 "converter_eligible_user_day_count"
@@ -692,6 +1105,7 @@ def build_habit_profile(
         "privacy_and_interpretation_notes": [
             "Only aggregate statistics should be published; anonymous user-slot rows are a reproducibility intermediate.",
             "High modal accuracy alone can reflect a dominant home cell; population and shuffled controls are therefore reported.",
+            "Transition slices use only adjacent raw pings, and every missing slot terminates a segment rather than being interpolated.",
             "The masked calendar is not reverse-engineered and no real city, date, or user identity is inferred.",
         ],
     }
@@ -734,6 +1148,102 @@ def write_timeslot_summary(path: Path, profile: dict[str, object]) -> None:
 def write_user_slot_rows(path: Path, rows: list[dict[str, object]]) -> None:
     with Path(path).open("w", encoding="utf-8", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=tuple(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def write_timing_slice_summary(path: Path, profile: dict[str, object]) -> None:
+    profiles = {
+        "all_observed_slots": profile[
+            "chronological_holdout_and_shuffled_null"
+        ],
+        "observed_adjacent_transition_arrivals": profile["timing_gain_slices"][
+            "observed_adjacent_transition_arrivals"
+        ],
+        "away_from_user_day_observed_dominant_cell": profile[
+            "timing_gain_slices"
+        ]["away_from_user_day_observed_dominant_cell"],
+    }
+    with Path(path).open("w", encoding="utf-8", newline="") as stream:
+        fieldnames = (
+            "slice",
+            "held_out_observations",
+            "personalized_top1_exact_hit_rate",
+            "population_timeslot_top1_exact_hit_rate",
+            "shuffled_null_mean_exact_hit_rate",
+            "observed_minus_null_mean_exact_hit_rate",
+            "empirical_one_sided_p_value",
+        )
+        writer = csv.DictWriter(stream, fieldnames=fieldnames)
+        writer.writeheader()
+        for name, null_profile in profiles.items():
+            observed = null_profile["observed_chronological_holdout"]
+            null_rates = null_profile["null_personalized_top1_exact_hit_rate"]
+            comparison = null_profile["comparison"]
+            writer.writerow({
+                "slice": name,
+                "held_out_observations": observed["held_out_observations"],
+                "personalized_top1_exact_hit_rate": observed[
+                    "personalized_top1_exact_hit_rate"
+                ],
+                "population_timeslot_top1_exact_hit_rate": observed[
+                    "population_timeslot_top1_exact_hit_rate"
+                ],
+                "shuffled_null_mean_exact_hit_rate": (
+                    null_rates["mean"] if null_rates else None
+                ),
+                "observed_minus_null_mean_exact_hit_rate": (
+                    comparison["observed_minus_null_mean_exact_hit_rate"]
+                    if comparison else None
+                ),
+                "empirical_one_sided_p_value": (
+                    comparison["empirical_one_sided_p_value"]
+                    if comparison else None
+                ),
+            })
+
+
+def write_segment_summary(path: Path, profile: dict[str, object]) -> None:
+    segment = profile["observed_stay_transition_segmentation"]
+    rows: list[dict[str, object]] = []
+
+    def add_distribution(name: str, value: dict[str, object] | None) -> None:
+        if value is None:
+            return
+        rows.append({"metric": name, "value": None, **value})
+
+    for name in (
+        "observed_user_day_count",
+        "converter_eligible_user_day_count",
+        "observed_user_day_rate_with_confirmed_adjacent_transition",
+        "observed_user_day_rate_with_unassigned_internal_gap",
+    ):
+        rows.append({"metric": name, "value": segment[name]})
+    for section in (
+        "adjacent_observed_edge_composition",
+        "observed_location_run_composition",
+    ):
+        for name, value in segment[section].items():
+            rows.append({"metric": f"{section}.{name}", "value": value})
+    for name in (
+        "observed_location_run_length_slots",
+        "confirmed_stay_segment_length_slots",
+        "confirmed_stay_segment_length_hours",
+        "confirmed_adjacent_transition_step_distance_km",
+        "internal_unobserved_gap_length_slots",
+    ):
+        add_distribution(name, segment[name])
+    for name, value in segment["per_converter_eligible_user_day"].items():
+        add_distribution(f"per_converter_eligible_user_day.{name}", value)
+    for name in ("same_cell_gap_length_slots", "different_cell_gap_length_slots"):
+        add_distribution(
+            f"internal_gap_boundary_classes.{name}",
+            segment["internal_gap_boundary_classes"][name],
+        )
+
+    with Path(path).open("w", encoding="utf-8", newline="") as stream:
+        fieldnames = ("metric", "value", "count", "min", "p10", "p50", "p90", "max", "mean")
+        writer = csv.DictWriter(stream, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
 
@@ -794,6 +1304,14 @@ def main() -> None:
         encoding="utf-8",
     )
     write_timeslot_summary(args.output_dir / "timeslot_stability.csv", profile)
+    write_timing_slice_summary(
+        args.output_dir / "timing_slice_fingerprint.csv",
+        profile,
+    )
+    write_segment_summary(
+        args.output_dir / "observed_segment_profile.csv",
+        profile,
+    )
     write_user_slot_rows(args.output_dir / "user_slot_stability.csv", rows)
     print(json.dumps({
         "habit_profile": str(summary_path),
@@ -802,6 +1320,9 @@ def main() -> None:
         ],
         "conversion_counts_match": profile["conversion_cross_check"][
             "counts_match"
+        ],
+        "consistency_fingerprint": profile["consistency_fingerprint"][
+            "raw_reference_targets"
         ],
     }, ensure_ascii=False, indent=2))
 

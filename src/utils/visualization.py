@@ -1,7 +1,9 @@
 import os
-import numpy as np
+
 import matplotlib.pyplot as plt
+import numpy as np
 import torch
+
 from src.data.transforms import para2point
 
 def visualize_velocity_field(model, device, save_folder, resolution=20, range_min=-3, range_max=3):
@@ -48,6 +50,47 @@ def visualize_velocity_field(model, device, save_folder, resolution=20, range_mi
     plt.tight_layout()
     plt.savefig(os.path.join(save_folder, 'velocity_field.png'), dpi=300)
     plt.close()
+
+
+def _grid_plot_bounds(grid_metadata):
+    """Return plotting bounds for trajectories drawn as x=coord[1], y=coord[0]."""
+    if not grid_metadata:
+        return None
+    coordinate_min = float(grid_metadata.get('coordinate_min', 1))
+    width = int(grid_metadata.get('width', 200))
+    height = int(grid_metadata.get('height', 200))
+    return (
+        coordinate_min - 0.5,
+        coordinate_min + height - 0.5,
+        coordinate_min - 0.5,
+        coordinate_min + width - 0.5,
+    )
+
+
+def _out_of_bounds_trajectory_mask(trajectories, grid_metadata):
+    trajectories = np.asarray(trajectories, dtype=np.float64)
+    bounds = _grid_plot_bounds(grid_metadata)
+    if bounds is None:
+        return np.zeros(len(trajectories), dtype=bool)
+    plot_x_min, plot_x_max, plot_y_min, plot_y_max = bounds
+    points_in_bounds = (
+        (trajectories[..., 1] >= plot_x_min)
+        & (trajectories[..., 1] < plot_x_max)
+        & (trajectories[..., 0] >= plot_y_min)
+        & (trajectories[..., 0] < plot_y_max)
+    )
+    return np.any(~points_in_bounds, axis=1)
+
+
+def _apply_grid_limits(axis, grid_metadata):
+    bounds = _grid_plot_bounds(grid_metadata)
+    if bounds is None:
+        axis.axis('equal')
+        return
+    plot_x_min, plot_x_max, plot_y_min, plot_y_max = bounds
+    axis.set_xlim(plot_x_min, plot_x_max)
+    axis.set_ylim(plot_y_min, plot_y_max)
+    axis.set_aspect('equal', adjustable='box')
 
 def visualize_density_comparison(sol, ground_truth, M, save_folder,**kwargs):
     """
@@ -99,30 +142,62 @@ def visualize_density_comparison(sol, ground_truth, M, save_folder,**kwargs):
     gen_points = generated_trajectories.reshape(-1, 2)  # Shape: [sample_count*M, 2]
     gt_points = gt_trajectories.reshape(-1, 2)  # Shape: [sample_count*M, 2]
 
-    # Create comparison plot
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 8))
-
-    # Calculate plot range
-    y_min = min(gt_points[:, 0].min(), gen_points[:, 0].min()) - 1
-    y_max = max(gt_points[:, 0].max(), gen_points[:, 0].max()) + 1
-    x_min = min(gt_points[:, 1].min(), gen_points[:, 1].min()) - 1
-    x_max = max(gt_points[:, 1].max(), gen_points[:, 1].max()) + 1
+    # Create comparison plot.  When grid metadata is available, keep the main
+    # figure on the valid domain so a handful of extreme samples cannot make the
+    # real density unreadable.
+    _fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 8))
+    grid_metadata = kwargs.get('grid_metadata')
+    plot_bounds = _grid_plot_bounds(grid_metadata)
+    if plot_bounds is None:
+        x_min = min(gt_points[:, 1].min(), gen_points[:, 1].min()) - 1
+        x_max = max(gt_points[:, 1].max(), gen_points[:, 1].max()) + 1
+        y_min = min(gt_points[:, 0].min(), gen_points[:, 0].min()) - 1
+        y_max = max(gt_points[:, 0].max(), gen_points[:, 0].max()) + 1
+    else:
+        x_min, x_max, y_min, y_max = plot_bounds
+    density_bins = kwargs.get('density_bins', 100)
+    if isinstance(density_bins, (int, np.integer)):
+        plot_bins = (int(density_bins), int(density_bins))
+    else:
+        # Metric bins are ordered by coord[0], coord[1]; hist2d below plots them
+        # as y, x respectively.
+        plot_bins = (int(density_bins[1]), int(density_bins[0]))
+    gt_oob_points = int(
+        (
+            (gt_points[:, 1] < x_min)
+            | (gt_points[:, 1] >= x_max)
+            | (gt_points[:, 0] < y_min)
+            | (gt_points[:, 0] >= y_max)
+        ).sum()
+    )
+    gen_oob_points = int(
+        (
+            (gen_points[:, 1] < x_min)
+            | (gen_points[:, 1] >= x_max)
+            | (gen_points[:, 0] < y_min)
+            | (gen_points[:, 0] >= y_max)
+        ).sum()
+    )
 
     # Plot density for ground truth
-    h1 = ax1.hist2d(gt_points[:, 1], gt_points[:, 0], bins=100,
+    h1 = ax1.hist2d(gt_points[:, 1], gt_points[:, 0], bins=plot_bins,
                    range=((x_min, x_max), (y_min, y_max)),
                    cmap='Blues', density=True)
-    ax1.set_title("Ground Truth Density")
+    ax1.set_title(
+        f"Ground Truth Density (in-domain; excluded {gt_oob_points}/{len(gt_points)})"
+    )
     ax1.set_xlabel("X")
     ax1.set_ylabel("Y")
     ax1.grid(True, alpha=0.3)
     plt.colorbar(h1[3], ax=ax1, label='Density')
 
     # Plot density for generated samples
-    h2 = ax2.hist2d(gen_points[:, 1], gen_points[:, 0], bins=100,
+    h2 = ax2.hist2d(gen_points[:, 1], gen_points[:, 0], bins=plot_bins,
                    range=((x_min, x_max), (y_min, y_max)),
                    cmap='Reds', density=True)
-    ax2.set_title("Generated Density")
+    ax2.set_title(
+        f"Generated Density (in-domain; excluded {gen_oob_points}/{len(gen_points)})"
+    )
     ax2.set_xlabel("X")
     ax2.set_ylabel("Y")
     ax2.grid(True, alpha=0.3)
@@ -159,6 +234,10 @@ def visualize_trajectories(sol, ground_truth, M, parametrized,save_folder,**kwar
         pass
     # get trajectory length from **kwargs, if not provided, use default 120
     traj_length = kwargs.get('traj_length', 120)
+    representation_note = kwargs.get('representation_note')
+    point_label = f"{M} plotted points"
+    if representation_note:
+        point_label += f"; {representation_note}"
 
     max_trajs_to_plot = min(300, sample_count)
 
@@ -233,6 +312,19 @@ def visualize_trajectories(sol, ground_truth, M, parametrized,save_folder,**kwar
         generated_trajectories = sol.reshape(sample_count, M, 2)
         gt_trajectories = ground_truth.reshape(sample_count, M, 2)
 
+    grid_metadata = kwargs.get('grid_metadata')
+    generated_oob_mask = _out_of_bounds_trajectory_mask(
+        generated_trajectories,
+        grid_metadata,
+    )
+    generated_oob_count = int(generated_oob_mask.sum())
+    grid_note = ''
+    if grid_metadata:
+        grid_note = (
+            f"; clipped to valid grid; OOB trajectories "
+            f"{generated_oob_count}/{len(generated_trajectories)}"
+        )
+
     # --- Plot generated trajectories ---
     plt.figure(figsize=(12, 10))
     for i in range(max_trajs_to_plot):
@@ -240,11 +332,11 @@ def visualize_trajectories(sol, ground_truth, M, parametrized,save_folder,**kwar
         traj = generated_trajectories[i]  # Shape: [M, 2]
         plt.plot(traj[:, 1], traj[:, 0], '-', color='blue', linewidth=1, alpha=0.1)
 
-    plt.title(f"Generated Trajectories (M={M} points)")
+    plt.title(f"Generated Trajectories ({point_label}{grid_note})")
     plt.xlabel("X")
     plt.ylabel("Y")
     plt.grid(True, alpha=0.3)
-    plt.axis('equal')
+    _apply_grid_limits(plt.gca(), grid_metadata)
     plt.tight_layout()
     plt.savefig(f"{save_folder}/generated_trajectories.png", dpi=300, bbox_inches='tight')
     plt.close()
@@ -255,11 +347,11 @@ def visualize_trajectories(sol, ground_truth, M, parametrized,save_folder,**kwar
         traj = gt_trajectories[i]  # Shape: [M, 2]
         plt.plot(traj[:, 1], traj[:, 0], '-', color='red', linewidth=1, alpha=0.1)
 
-    plt.title(f"Ground Truth Trajectories (M={M} points)")
+    plt.title(f"Ground Truth Trajectories ({point_label})")
     plt.xlabel("X")
     plt.ylabel("Y")
     plt.grid(True, alpha=0.3)
-    plt.axis('equal')
+    _apply_grid_limits(plt.gca(), grid_metadata)
     plt.tight_layout()
     plt.savefig(f"{save_folder}/ground_truth_trajectories.png", dpi=300, bbox_inches='tight')
     plt.close()
@@ -279,14 +371,60 @@ def visualize_trajectories(sol, ground_truth, M, parametrized,save_folder,**kwar
     custom_lines = [Line2D([0], [0], color='blue', lw=2),
                   Line2D([0], [0], color='red', lw=2)]
     plt.legend(custom_lines, ['Generated', 'Ground Truth'])
-    plt.title(f"Generated (blue) vs Ground Truth (red) Trajectories (M={M} points)")
+    plt.title(
+        f"Generated (blue) vs Ground Truth (red) Trajectories "
+        f"({point_label}{grid_note})"
+    )
     plt.xlabel("X")
     plt.ylabel("Y")
     plt.grid(True, alpha=0.3)
-    plt.axis('equal')
+    _apply_grid_limits(plt.gca(), grid_metadata)
     plt.tight_layout()
     plt.savefig(f"{save_folder}/trajectory_comparison.png", dpi=300, bbox_inches='tight')
     plt.close()
+
+    if grid_metadata and generated_oob_count:
+        from matplotlib.patches import Rectangle
+
+        fig, axis = plt.subplots(figsize=(12, 10))
+        outliers = generated_trajectories[generated_oob_mask]
+        for trajectory in outliers:
+            axis.plot(
+                trajectory[:, 1],
+                trajectory[:, 0],
+                '-',
+                color='blue',
+                linewidth=1,
+                alpha=0.25,
+            )
+        x_min, x_max, y_min, y_max = _grid_plot_bounds(grid_metadata)
+        axis.add_patch(
+            Rectangle(
+                (x_min, y_min),
+                x_max - x_min,
+                y_max - y_min,
+                fill=False,
+                edgecolor='black',
+                linewidth=2,
+                label='Valid grid',
+            )
+        )
+        axis.set_title(
+            f"Generated Out-of-Bounds Trajectories ({generated_oob_count}/"
+            f"{len(generated_trajectories)})"
+        )
+        axis.set_xlabel("X")
+        axis.set_ylabel("Y")
+        axis.grid(True, alpha=0.3)
+        axis.set_aspect('equal', adjustable='datalim')
+        axis.legend()
+        fig.tight_layout()
+        fig.savefig(
+            f"{save_folder}/generated_outliers.png",
+            dpi=300,
+            bbox_inches='tight',
+        )
+        plt.close(fig)
 
 
 def _visualize_conditional_samples(self, samples, month, cfg_scale, save_dir):

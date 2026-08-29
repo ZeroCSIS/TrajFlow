@@ -83,6 +83,51 @@ Transport mode ids follow the preprocessing convention:
 - Shape: `(num_samples, 10, 2)`
 - Included so the toy smoke test does not need to recompute coefficients.
 
+## YJMob100K Dataset1 Adapter
+
+`data_utils/prepare_yjmob.py` consumes the official `uid,d,t,x,y` CSV or
+CSV.GZ and emits the processed schema above plus:
+
+- `manifest.csv`: `sample_index,uid,day,split,observation_count,first_timeslot,last_timeslot`.
+  This is the only model-side artifact that retains longitudinal identity.
+- `split_indices.npz`: train/validation/test row indices. Splits are assigned by
+  a seeded user hash, never by user-day, to prevent identity leakage.
+- `dataset_summary.json`: checksum, filters, split counts, and scan statistics.
+- `grid_meta.json`: the 200x200 x/y grid and the reversible flat-cell formula
+  `(x - 1) * 200 + (y - 1)`.
+
+For YJMob, the condition columns mean:
+
+1. first observed 30-minute slot converted to a 5-minute bucket (`t * 6`);
+2. observed-point path length in metres, using the documented 500 m grid;
+3. elapsed seconds from first to last observed slot;
+4. number of observed slots before resampling;
+5. average distance in metres (`path length / observed slot count`), matching
+   TrajFlow's existing condition definition;
+6. average speed in metres/second;
+7. origin flat-cell id;
+8. destination flat-cell id;
+9. constant zero placeholder (transport mode is disabled in the YJ config).
+
+Columns 2-6 are standardized using training users only. The converter rejects
+unexpected columns, out-of-range slots/cells, unsorted input, checksum mismatch,
+and accidental overwrite unless `--overwrite` is explicitly passed.
+
+`data_utils/analyze_yjmob_habits.py` reads the official raw file together with a
+prepared `manifest.csv` and writes three diagnostic artifacts:
+
+- `habit_profile.json`: aggregate raw-slot coverage, missing-gap exposure,
+  per-user/per-timeslot stability, chronological holdout controls, shuffled-null
+  results, lagged similarity, and masked weekly-phase sensitivity;
+- `timeslot_stability.csv`: 48 aggregate rows suitable for plotting;
+- `user_slot_stability.csv`: anonymous cohort-level reproducibility rows. Keep
+  this detailed intermediate in the experiment archive; publish aggregate
+  statistics rather than individual rows.
+
+The profiler does not interpolate raw observations and does not infer the
+hidden civil calendar or location. It excludes day 27 by default, matching the
+official data descriptor and the adapter.
+
 ## Using Authorized Real Data
 
 If you have authorized access to your own trajectory data, convert

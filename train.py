@@ -1,12 +1,22 @@
-import os
 import argparse
-import torch
-import yaml
+import json
+import os
+import platform
+import subprocess
+import sys
 from datetime import datetime
 
-from src.models.networks import MLP, CNN, TransformerVelocity, BiLSTMVelocity, ConditionalVelocityModel, TrajUnet
+import torch
+import yaml
+
 from src.data.dataset import FlowMatchingDataset
+from src.models.networks import (
+    MLP,
+    ConditionalVelocityModel,
+)
 from src.training.trainer import FlowMatchingTrainer
+from src.utils.reproducibility import seed_everything
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Flow Matching Training')
@@ -14,7 +24,89 @@ def parse_args():
                         help='Path to configuration file')
     parser.add_argument('--output', type=str, default='./outputs',
                         help='Directory to save checkpoints and results')
+    parser.add_argument('--seed', type=int, default=None,
+                        help='Override project.seed for an independent repeat')
+    parser.add_argument('--run-name', type=str, default=None,
+                        help='Optional run-name prefix (letters, digits, dash, underscore)')
     return parser.parse_args()
+
+
+def _git_value(*args):
+    try:
+        result = subprocess.run(
+            ['git', *args], capture_output=True, text=True, check=False
+        )
+    except OSError:
+        return None
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def _environment_bool(name):
+    value = os.environ.get(name)
+    if value is None:
+        return None
+    normalized = value.strip().lower()
+    if normalized in {'1', 'true', 'yes'}:
+        return True
+    if normalized in {'0', 'false', 'no'}:
+        return False
+    raise ValueError(f"{name} must be one of true/false, 1/0, or yes/no")
+
+
+def write_run_manifest(path, config_path, config, device, train_dataset, validation_dataset):
+    cuda_devices = []
+    if torch.cuda.is_available():
+        cuda_devices = [
+            {'visible_index': index, 'name': torch.cuda.get_device_name(index)}
+            for index in range(torch.cuda.device_count())
+        ]
+    dataset_summary = None
+    dataset_folder = getattr(train_dataset, 'input_folder', None)
+    if dataset_folder is not None:
+        dataset_summary_path = os.path.join(dataset_folder, 'dataset_summary.json')
+        if os.path.exists(dataset_summary_path):
+            with open(dataset_summary_path, encoding='utf-8') as stream:
+                dataset_summary = json.load(stream)
+
+    git_commit_from_repo = _git_value('rev-parse', 'HEAD')
+    git_status = _git_value('status', '--porcelain')
+    manifest = {
+        'config_path': os.path.abspath(config_path),
+        'seed': int(config.get('project', {}).get('seed', 42)),
+        'deterministic': bool(config.get('project', {}).get('deterministic', True)),
+        'git_commit': git_commit_from_repo or os.environ.get('TRAJFLOW_GIT_COMMIT'),
+        'git_dirty': (
+            bool(git_status)
+            if git_status is not None
+            else _environment_bool('TRAJFLOW_GIT_DIRTY')
+        ),
+        'git_provenance_source': (
+            'git' if git_commit_from_repo is not None else 'environment'
+            if os.environ.get('TRAJFLOW_GIT_COMMIT') is not None else None
+        ),
+        'python': sys.version,
+        'platform': platform.platform(),
+        'torch': torch.__version__,
+        'device': str(device),
+        'cuda_devices': cuda_devices,
+        'train_samples': len(train_dataset),
+        'validation_samples': len(validation_dataset) if validation_dataset is not None else 0,
+        'training_target_preflight': getattr(
+            train_dataset,
+            'parameterized_target_summary',
+            None,
+        ),
+        'validation_target_preflight': getattr(
+            validation_dataset,
+            'parameterized_target_summary',
+            None,
+        ) if validation_dataset is not None else None,
+        'split_file': getattr(train_dataset, 'split_indices_path', None),
+        'dataset_summary': dataset_summary,
+    }
+    with open(path, 'w', encoding='utf-8') as stream:
+        json.dump(manifest, stream, ensure_ascii=False, indent=2)
+        stream.write('\n')
 
 def main():
     args = parse_args()
@@ -22,6 +114,11 @@ def main():
     # Load configuration
     with open(args.config, 'r') as f:
         config = yaml.safe_load(f)
+    if args.seed is not None:
+        config.setdefault('project', {})['seed'] = args.seed
+    seed = int(config.get('project', {}).get('seed', 42))
+    deterministic = bool(config.get('project', {}).get('deterministic', True))
+    seed_everything(seed, deterministic=deterministic)
 
     # Validate model configuration
     # Check: if multiple models are enabled within flow_matching and ddpm, baseline, raise error
@@ -46,11 +143,17 @@ def main():
         print("Using DDPM model")
 
     # Create output directory
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    if config['project']['output_dir']:
-        run_dir = os.path.join(config['project']['output_dir'], f"run_{timestamp}")
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+    if args.run_name is not None:
+        if not args.run_name.replace('-', '').replace('_', '').isalnum():
+            raise ValueError("run-name may contain only letters, digits, dash, and underscore")
+        run_basename = f"{args.run_name}_seed{seed}_{timestamp}"
     else:
-        run_dir = os.path.join(args.output, f"run_{timestamp}")
+        run_basename = f"run_seed{seed}_{timestamp}"
+    if config['project']['output_dir']:
+        run_dir = os.path.join(config['project']['output_dir'], run_basename)
+    else:
+        run_dir = os.path.join(args.output, run_basename)
     os.makedirs(run_dir, exist_ok=True)
 
     # Save config for reproducibility
@@ -63,6 +166,9 @@ def main():
     # Create dataset
     dataset_params = config['data']
     dataset = FlowMatchingDataset(config, mode='train')
+    validation_dataset = None
+    if config.get('training', {}).get('use_validation', False):
+        validation_dataset = FlowMatchingDataset(config, mode='val')
 
     # Create model
     model_params = config['model']
@@ -114,7 +220,9 @@ def main():
                 print("Creating GAN baseline model...")
         elif baseline_type == 'markov':
             if conditional:
-                from src.models.markov import ConditionalContinuousMarkovTrajectoryGenerator
+                from src.models.markov import (
+                    ConditionalContinuousMarkovTrajectoryGenerator,
+                )
                 model = ConditionalContinuousMarkovTrajectoryGenerator(config=config, dataset=dataset)
                 print("Creating Conditional Markov baseline model...")
             else:
@@ -124,13 +232,30 @@ def main():
         else:
             raise ValueError(f"Unknown baseline type: {baseline_type}")
 
+    if config.get('training', {}).get('data_parallel', False):
+        if device.type == 'cuda' and torch.cuda.device_count() > 1:
+            print(f"Using DataParallel across {torch.cuda.device_count()} visible GPUs")
+            model = torch.nn.DataParallel(model)
+        else:
+            print("data_parallel requested, but fewer than two CUDA devices are visible")
+
+    write_run_manifest(
+        os.path.join(run_dir, 'run_manifest.json'),
+        args.config,
+        config,
+        device,
+        dataset,
+        validation_dataset,
+    )
+
     # Create trainer
     trainer = FlowMatchingTrainer(
         config=config,
         model=model,
         dataset=dataset,
         save_dir=run_dir,
-        device=device
+        device=device,
+        validation_dataset=validation_dataset,
     )
 
     # Train model
@@ -140,7 +265,14 @@ def main():
     # Plot training loss
     import matplotlib.pyplot as plt
     plt.figure(figsize=(10, 6))
-    plt.plot(train_losses)
+    if trainer.validation_losses and any(
+        value is not None for value in trainer.validation_losses
+    ):
+        plt.plot(trainer.validation_losses, label='Validation')
+        plt.plot(train_losses, label='Train')
+        plt.legend()
+    else:
+        plt.plot(train_losses)
     plt.title('Training Loss')
     plt.xlabel('Epoch')
     plt.ylabel('Loss')

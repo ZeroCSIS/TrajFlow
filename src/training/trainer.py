@@ -1,21 +1,24 @@
+import json
 import os
 import time
-import torch
-from torch.utils.data import DataLoader
-import numpy as np
 
-from src.models.wrappers import WrappedModel, ConditionedVelocityModelWrapper
-from src.utils.visualization import (
-    visualize_velocity_field,
-    visualize_density_comparison,
-    visualize_trajectories
-)
-from src.data.transforms import para2point
-from src.eval.inference import FlowMatchingInference
+import numpy as np
+import torch
 from torch.optim.lr_scheduler import ReduceLROnPlateau
+from torch.utils.data import DataLoader
+
+from src.eval.inference import FlowMatchingInference
+from src.models.wrappers import ConditionedVelocityModelWrapper
+from src.utils.reproducibility import make_generator, seed_dataloader_worker
+from src.utils.visualization import (
+    visualize_density_comparison,
+    visualize_trajectories,
+    visualize_velocity_field,
+)
+
 
 class FlowMatchingTrainer:
-    def __init__(self, config, model, dataset, save_dir, device):
+    def __init__(self, config, model, dataset, save_dir, device, validation_dataset=None):
         """
         Flow Matching trainer
 
@@ -29,6 +32,7 @@ class FlowMatchingTrainer:
         self.config = config
         self.model = model.to(device)
         self.dataset = dataset
+        self.validation_dataset = validation_dataset
         self.save_dir = save_dir
         self.device = device
 
@@ -44,7 +48,26 @@ class FlowMatchingTrainer:
 
         # Setup dataloader
         batch_size = config['data']['batch_size']
-        self.dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+        seed = int(config.get('project', {}).get('seed', 42))
+        num_workers = int(config['data'].get('num_workers', 0))
+        self.dataloader = DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=True,
+            num_workers=num_workers,
+            worker_init_fn=seed_dataloader_worker,
+            generator=make_generator(seed),
+        )
+        self.validation_dataloader = None
+        if validation_dataset is not None:
+            self.validation_dataloader = DataLoader(
+                validation_dataset,
+                batch_size=batch_size,
+                shuffle=False,
+                num_workers=num_workers,
+                worker_init_fn=seed_dataloader_worker,
+                generator=make_generator(seed + 1),
+            )
 
         # Create optimizer
         self.optimizer = torch.optim.Adam(
@@ -92,14 +115,14 @@ class FlowMatchingTrainer:
         flow_type = self.config['flow_matching']['flow_type']
 
         if flow_type == "standard":
-            from flow_matching.path.scheduler import CondOTScheduler
             from flow_matching.path import AffineProbPath
+            from flow_matching.path.scheduler import CondOTScheduler
             scheduler = CondOTScheduler()
             self.path = AffineProbPath(scheduler=scheduler)
             self.manifold = None
         elif flow_type == "discrete":
-            from flow_matching.path.scheduler import StandardScheduler
             from flow_matching.path import DiscreteProbPath
+            from flow_matching.path.scheduler import StandardScheduler
             scheduler = StandardScheduler()
             self.path = DiscreteProbPath(scheduler=scheduler)
             self.manifold = None
@@ -110,9 +133,10 @@ class FlowMatchingTrainer:
 
     def setup_riemannian_flow(self):
         """Setup Riemannian flow components"""
-        from flow_matching.path.scheduler import CondOTScheduler
         from flow_matching.path import GeodesicProbPath
-        from flow_matching.utils.manifolds import FlatTorus, Euclidean
+        from flow_matching.path.scheduler import CondOTScheduler
+        from flow_matching.utils.manifolds import Euclidean, FlatTorus
+
         from src.models.wrappers import ProjectToTangent
 
         # Determine manifold based on dataset type
@@ -190,8 +214,14 @@ class FlowMatchingTrainer:
         return loss.item()
 
     def _train_step_flow_matching(self, batch):
+        self.optimizer.zero_grad()
+        loss = self._flow_matching_loss(batch, apply_condition_dropout=True)
+        loss.backward()
+        self.optimizer.step()
+        return loss.item()
 
-        # Move existing train_step logic here
+    def _flow_matching_loss(self, batch, apply_condition_dropout):
+        """Compute the flow-matching objective without mutating optimizer state."""
         if self.config['condition']['enabled']:
             x_1, condition = batch
             x_1 = x_1.to(self.device)
@@ -199,9 +229,6 @@ class FlowMatchingTrainer:
         else:
             x_1 = batch.to(self.device)
             condition = None
-
-        """Perform a single training step"""
-        self.optimizer.zero_grad()
         batch_size = x_1.shape[0]
 
         # Generate random initial points
@@ -221,7 +248,7 @@ class FlowMatchingTrainer:
         if condition is not None and self.config.get('condition', {}).get('enabled', False):
             # Apply classifier-free guidance dropout during training
             dropout_prob = self.config['flow_matching'].get('dropout_prob', 0.1)
-            if dropout_prob > 0 and torch.rand(1).item() < dropout_prob:
+            if apply_condition_dropout and dropout_prob > 0 and torch.rand(1).item() < dropout_prob:
                 # With probability dropout_prob, don't pass condition (classifier-free training)
                 # set condition to zeros
                 zero_condition = torch.zeros_like(condition)
@@ -239,13 +266,37 @@ class FlowMatchingTrainer:
         if self.config['data']['od_finer'] == True:
             pred_v = pred_v.reshape(pred_v.size(0), -1)  # Flatten to [batch_size, n_dim]
             path_sample.dx_t = path_sample.dx_t.reshape(path_sample.dx_t.size(0), -1)  # Ensure same shape
-        loss = torch.pow(pred_v - path_sample.dx_t, 2).mean()
+        return torch.pow(pred_v - path_sample.dx_t, 2).mean()
 
-        # Backward pass and update
-        loss.backward()
-        self.optimizer.step()
+    def validation_loss(self):
+        """Evaluate on fixed noise/time draws so epochs are directly comparable."""
+        if self.validation_dataloader is None:
+            return None
+        if self.training_type != 'flow_matching':
+            raise NotImplementedError("Validation selection is currently implemented for flow matching")
 
-        return loss.item()
+        was_training = self.model.training
+        self.model.eval()
+        validation_seed = int(
+            self.config.get('training', {}).get(
+                'validation_seed', self.config.get('project', {}).get('seed', 42) + 10_000
+            )
+        )
+        cuda_devices = []
+        if self.device.type == 'cuda':
+            cuda_devices = [self.device.index if self.device.index is not None else torch.cuda.current_device()]
+        losses = []
+        with torch.random.fork_rng(devices=cuda_devices):
+            torch.manual_seed(validation_seed)
+            if self.device.type == 'cuda':
+                torch.cuda.manual_seed_all(validation_seed)
+            with torch.no_grad():
+                for batch in self.validation_dataloader:
+                    losses.append(float(self._flow_matching_loss(
+                        batch, apply_condition_dropout=False
+                    ).item()))
+        self.model.train(was_training)
+        return float(np.mean(losses))
 
     def _train_step_baseline(self, batch_data):
         """Training step for baseline models with proper conditional support"""
@@ -298,7 +349,17 @@ class FlowMatchingTrainer:
         """Train the model"""
         num_epochs = self.config['training']['num_epochs']
         print_every = self.config['training']['print_every']
-        save_every = self.config['training']['save_every']
+        save_every = int(self.config['training']['save_every'])
+        checkpoint_policy = self.config['training'].get(
+            'checkpoint_policy',
+            'periodic',
+        )
+        if checkpoint_policy not in {'periodic', 'best_and_last'}:
+            raise ValueError(
+                "training.checkpoint_policy must be 'periodic' or 'best_and_last'"
+            )
+        if save_every <= 0:
+            raise ValueError("training.save_every must be positive")
         is_conditional = self.config['condition']['enabled']
 
         total_iterations = num_epochs * len(self.dataloader)
@@ -307,8 +368,8 @@ class FlowMatchingTrainer:
             print_every = max(1, total_iterations // 10)
 
         iteration = 0
-        best_loss = float('inf')
         train_losses = []
+        self.validation_losses = []
 
         # Create visualization directory
         os.makedirs(self.save_dir, exist_ok=True)
@@ -318,6 +379,7 @@ class FlowMatchingTrainer:
         os.makedirs(self.model_dir, exist_ok=True)
 
         for epoch in range(num_epochs):
+            self.model.train()
             epoch_loss = 0
             start_time = time.time()
 
@@ -349,16 +411,46 @@ class FlowMatchingTrainer:
             # Average loss for the epoch
             avg_epoch_loss = epoch_loss / len(self.dataloader)
             train_losses.append(avg_epoch_loss)
+            avg_validation_loss = self.validation_loss()
+            self.validation_losses.append(avg_validation_loss)
+            selection_loss = (
+                avg_validation_loss if avg_validation_loss is not None else avg_epoch_loss
+            )
+            epoch_seconds = time.time() - start_time
+            epoch_message = (
+                f"Epoch {epoch}/{num_epochs} complete: train_loss={avg_epoch_loss:.6f}, "
+                f"validation_loss={avg_validation_loss:.6f}, seconds={epoch_seconds:.2f}"
+                if avg_validation_loss is not None
+                else f"Epoch {epoch}/{num_epochs} complete: train_loss={avg_epoch_loss:.6f}, "
+                     f"seconds={epoch_seconds:.2f}"
+            )
+            print(epoch_message)
+            with open(os.path.join(self.save_dir, 'training_log.txt'), 'a') as f:
+                f.write(epoch_message + '\n')
+            with open(os.path.join(self.save_dir, 'loss_history.json'), 'w') as f:
+                json.dump(
+                    {
+                        'train_loss': train_losses,
+                        'validation_loss': self.validation_losses,
+                        'selection_metric': (
+                            'validation_loss' if self.validation_dataloader is not None
+                            else 'train_loss'
+                        ),
+                        'checkpoint_policy': checkpoint_policy,
+                    },
+                    f,
+                    indent=2,
+                )
 
             # scheduler step for learning rate adjustment
-            self.scheduler.step(avg_epoch_loss)
+            self.scheduler.step(selection_loss)
 
             # Early stopping check
-            if avg_epoch_loss < self.best_loss - self.early_stop_delta:
-                self.best_loss = avg_epoch_loss
+            if selection_loss < self.best_loss - self.early_stop_delta:
+                self.best_loss = selection_loss
                 self.early_stop_counter = 0
                 self.save_checkpoint(os.path.join(self.model_dir, 'best_model.pt'))
-                print(f"New best model saved with loss: {self.best_loss:.6f}")
+                print(f"New best model saved with selection loss: {self.best_loss:.6f}")
             else:
                 self.early_stop_counter += 1
                 print(f"No improvement: {self.early_stop_counter}/{self.early_stop_patience}")
@@ -366,38 +458,45 @@ class FlowMatchingTrainer:
                     print(f"Early stopping triggered after {epoch + 1} epochs")
                     break
 
-            # Save checkpoint if better than previous best
-            if avg_epoch_loss < best_loss:
-                best_loss = avg_epoch_loss
-                self.save_checkpoint(os.path.join(self.model_dir, 'best_model.pt'))
-                print(f"New best model saved with loss: {best_loss:.6f}")
-
-            # Regular checkpoint saving
-            if epoch % save_every == 0 or epoch == num_epochs - 1:
+            # Periodic checkpoints remain available for legacy experiments.  The
+            # bounded YJMob baseline uses best_and_last to avoid duplicating a
+            # ~680 MB checkpoint at every reporting interval.
+            periodic_due = epoch % save_every == 0 or epoch == num_epochs - 1
+            if checkpoint_policy == 'periodic' and periodic_due:
                 self.save_checkpoint(os.path.join(self.model_dir, f'checkpoint_epoch_{epoch}.pt'))
 
-                # Generate visualizations
-                if self.config['training']['viz_bool']:
-                    self.inference_and_visualize(epoch, vis_dir,1, is_conditional)
+            # Generate visualizations on the existing cadence independent of the
+            # checkpoint retention policy.
+            if periodic_due and self.config['training']['viz_bool']:
+                self.inference_and_visualize(epoch, vis_dir,1, is_conditional)
 
-        # Final checkpoint
-        self.save_checkpoint(os.path.join(self.model_dir, 'final_model.pt'))
+        # best_and_last intentionally emits exactly the selection checkpoint and
+        # the terminal optimizer state.  Legacy runs keep final_model.pt.
+        final_name = (
+            'last_model.pt'
+            if checkpoint_policy == 'best_and_last'
+            else 'final_model.pt'
+        )
+        self.save_checkpoint(os.path.join(self.model_dir, final_name))
         print(f"Training completed. Final loss: {train_losses[-1]:.6f}")
 
         return train_losses
     def save_checkpoint(self, path):
         """Save model checkpoint"""
+        model = self.model.module if isinstance(self.model, torch.nn.DataParallel) else self.model
         checkpoint = {
-            'model_state_dict': self.model.state_dict(),
+            'model_state_dict': model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
-            'config': self.config
+            'config': self.config,
+            'selection_loss': self.best_loss,
         }
         torch.save(checkpoint, path)
 
     def load_checkpoint(self, path):
         """Load model checkpoint"""
         checkpoint = torch.load(path, map_location=self.device)
-        self.model.load_state_dict(checkpoint['model_state_dict'])
+        model = self.model.module if isinstance(self.model, torch.nn.DataParallel) else self.model
+        model.load_state_dict(checkpoint['model_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         return checkpoint['config']
 

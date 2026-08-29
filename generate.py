@@ -1,25 +1,37 @@
-import sys
-import os
-import random
 import argparse
-import torch
+import hashlib
+import json
+import os
+import platform
+import subprocess
+import sys
+from datetime import datetime, timezone
+
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-from tqdm import tqdm
+import torch
 import yaml
 from torch.utils.data import DataLoader
-from datetime import datetime
-from data_utils import PrepareDataset
-from src.models.networks import ConditionalVelocityModel, MLP, CNN, TransformerVelocity, BiLSTMVelocity
+
+from data_utils.profile_yjmob import write_dataset_profile
+from src.data.transforms import para2point_batch
+from src.eval.metrics import (
+    compute_best_of_k_metrics,
+    compute_control_metrics,
+    origin_destination_straight_lines,
+)
+from src.models.networks import (
+    CNN,
+    MLP,
+    BiLSTMVelocity,
+    ConditionalVelocityModel,
+    TransformerVelocity,
+)
 from src.models.trajectory_gan import ConditionalTrajectoryGAN, TrajectoryGAN
 from src.models.trajectory_vae import ConditionalTrajectoryVAE, TrajectoryVAE
-from src.data.transforms import para2point, para2point_batch
-
-from src.utils.visualization import (
-    visualize_density_comparison,
-    visualize_trajectories
-)
+from src.utils.reproducibility import seed_everything
+from src.utils.visualization import visualize_density_comparison, visualize_trajectories
 
 # Add project root to path
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -73,6 +85,193 @@ def resolve_device(device_str):
     return torch.device("cpu")
 
 
+def model_input_dim(config):
+    """Return the same trajectory representation width used by train.py."""
+    if config['data']['parametrized']:
+        points = config['data']['parametrized_M']
+    else:
+        points = config['data']['trajectory_length']
+    return int(points) * 2
+
+
+def _sha256_file(path):
+    if path is None or not os.path.isfile(path):
+        return None
+    digest = hashlib.sha256()
+    with open(path, 'rb') as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _git_value(*args):
+    try:
+        result = subprocess.run(
+            ['git', *args], capture_output=True, text=True, check=False
+        )
+    except OSError:
+        return None
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def _environment_bool(name):
+    value = os.environ.get(name)
+    if value is None:
+        return None
+    normalized = value.strip().lower()
+    if normalized in {'1', 'true', 'yes'}:
+        return True
+    if normalized in {'0', 'false', 'no'}:
+        return False
+    raise ValueError(f"{name} must be one of true/false, 1/0, or yes/no")
+
+
+def select_evaluation_indices(dataset_size, generate_num, seed, control_num=0):
+    """Select deterministic model and disjoint real-control samples."""
+    if dataset_size <= 0:
+        raise ValueError("The evaluation dataset is empty")
+    if generate_num <= 0:
+        raise ValueError("generate_num must be positive")
+    if control_num < 0:
+        raise ValueError("control_num must be non-negative")
+    permutation = np.random.RandomState(int(seed)).permutation(dataset_size)
+    generated_count = min(int(generate_num), dataset_size)
+    generated_indices = permutation[:generated_count]
+    control_count = min(int(control_num), dataset_size - generated_count)
+    control_indices = permutation[
+        generated_count:generated_count + control_count
+    ]
+    return generated_indices, control_indices
+
+
+def raw_dataset_trajectories(dataset, indices, config, traj_mean, traj_std):
+    """Return processed raw-coordinate trajectories for local dataset indices."""
+    indices = np.asarray(indices, dtype=np.int64)
+    source = getattr(dataset, 'traj_segments_before_stdize', dataset.traj_segments)
+    trajectories = np.asarray(source)[indices].copy()
+    trajectory_length = int(config['data']['trajectory_length'])
+    if trajectories.ndim == 2:
+        trajectories = trajectories.reshape(len(indices), -1, 2)
+    if trajectories.shape[1] != trajectory_length:
+        if config['data'].get('parametrized', False):
+            method = config['data'].get(
+                'parametrized_method',
+                config['data'].get('para_method', 'rdp_k'),
+            )
+            trajectories = para2point_batch(trajectories, trajectory_length, method)
+        else:
+            trajectories = np.asarray([
+                resample_trajectory(trajectory, trajectory_length)
+                for trajectory in trajectories
+            ])
+    if not dataset.grid_metadata.get('coordinates_are_raw', False):
+        trajectories = trajectories * np.asarray(traj_std) + np.asarray(traj_mean)
+    return np.asarray(trajectories, dtype=np.float64)
+
+
+def repeat_paired_references(reference, samples_per_condition):
+    """Match condition-major candidate order for paired visualizations."""
+    reference = np.asarray(reference)
+    samples_per_condition = int(samples_per_condition)
+    if samples_per_condition <= 0:
+        raise ValueError("samples_per_condition must be positive")
+    return np.repeat(reference, samples_per_condition, axis=0)
+
+
+def write_generation_manifest(
+    path,
+    *,
+    config_path,
+    checkpoint_path,
+    config,
+    dataset,
+    selected_indices,
+    control_indices,
+    arrays,
+    metrics_path,
+    sampling_steps,
+    sampling_method,
+    condition_mode,
+    samples_per_condition=1,
+    metric_workers=1,
+    dataset_profile_path=None,
+):
+    """Write provenance for a generation/evaluation run."""
+    git_commit_from_repo = _git_value('rev-parse', 'HEAD')
+    git_status = _git_value('status', '--porcelain')
+    git_commit = git_commit_from_repo or os.environ.get('TRAJFLOW_GIT_COMMIT')
+    git_dirty = (
+        bool(git_status)
+        if git_status is not None
+        else _environment_bool('TRAJFLOW_GIT_DIRTY')
+    )
+    source_indices = np.asarray(
+        getattr(dataset, 'sample_indices', np.arange(len(dataset))),
+        dtype=np.int64,
+    )
+    selected_indices = np.asarray(selected_indices, dtype=np.int64)
+    control_indices = np.asarray(control_indices, dtype=np.int64)
+    cuda_devices = []
+    if torch.cuda.is_available():
+        cuda_devices = [
+            {'visible_index': index, 'name': torch.cuda.get_device_name(index)}
+            for index in range(torch.cuda.device_count())
+        ]
+    manifest = {
+        'schema_version': 'trajflow-generation-manifest-v2',
+        'created_at_utc': datetime.now(timezone.utc).isoformat(),
+        'config_path': os.path.abspath(config_path) if config_path else None,
+        'config_sha256': _sha256_file(config_path),
+        'checkpoint_path': os.path.abspath(checkpoint_path) if checkpoint_path else None,
+        'checkpoint_size_bytes': (
+            os.path.getsize(checkpoint_path)
+            if checkpoint_path and os.path.isfile(checkpoint_path)
+            else None
+        ),
+        'checkpoint_sha256': _sha256_file(checkpoint_path),
+        'git_commit': git_commit,
+        'git_dirty': git_dirty,
+        'git_provenance_source': (
+            'git' if git_commit_from_repo is not None else 'environment'
+            if git_commit is not None else None
+        ),
+        'python': sys.version,
+        'platform': platform.platform(),
+        'torch': torch.__version__,
+        'device': str(device),
+        'cuda_devices': cuda_devices,
+        'seed': int(config.get('project', {}).get('seed', 42)),
+        'deterministic': bool(config.get('project', {}).get('deterministic', True)),
+        'sampling_steps': int(sampling_steps),
+        'sampling_method': sampling_method,
+        'condition_mode': condition_mode,
+        'samples_per_condition': int(samples_per_condition),
+        'metric_workers': int(metric_workers),
+        'legacy_rowwise_csv_outputs_written': bool(samples_per_condition == 1),
+        'condition_type': config.get('condition', {}).get('condition_type'),
+        'condition_contains_ground_truth_summary': (
+            config.get('condition', {}).get('condition_type') == 'full'
+        ),
+        'test_split_samples': len(dataset),
+        'selected_test_local_indices': selected_indices.tolist(),
+        'selected_source_sample_indices': source_indices[selected_indices].tolist(),
+        'real_control_test_local_indices': control_indices.tolist(),
+        'real_control_source_sample_indices': source_indices[control_indices].tolist(),
+        'array_shapes': {
+            name: list(np.asarray(values).shape) for name, values in arrays.items()
+        },
+        'metrics_path': os.path.abspath(metrics_path) if metrics_path else None,
+        'metrics_sha256': _sha256_file(metrics_path),
+        'dataset_profile_path': (
+            os.path.abspath(dataset_profile_path) if dataset_profile_path else None
+        ),
+        'dataset_profile_sha256': _sha256_file(dataset_profile_path),
+    }
+    with open(path, 'w', encoding='utf-8') as stream:
+        json.dump(manifest, stream, ensure_ascii=False, indent=2)
+        stream.write('\n')
+
+
 def find_config_by_timestamp(exp_savename_str):
     """Find config file by timestamp in folder name"""
     # Search standard output root used in the open-source package.
@@ -99,9 +298,18 @@ def find_config_by_timestamp(exp_savename_str):
 
 def generate_trajectories(model, all_gt_data, all_head, lengths, traj_mean, traj_std,
                           cond_mean, cond_std, config, batch_size, num_batches,
-                          result_dir, dataset, condition_mode="real", generate_num=10, save_dir='./test_output'):
+                          result_dir, dataset, condition_mode="real", generate_num=10,
+                          save_dir='./test_output', checkpoint_path=None,
+                          config_path=None, samples_per_condition=1,
+                          metric_workers=1):
     """Generate trajectories using flow matching model"""
     os.makedirs(save_dir, exist_ok=True)
+    samples_per_condition = int(samples_per_condition)
+    metric_workers = int(metric_workers)
+    if samples_per_condition <= 0:
+        raise ValueError("samples_per_condition must be positive")
+    if metric_workers <= 0:
+        raise ValueError("metric_workers must be positive")
 
     # IF SAVE TRAJECTORIES BEFORE DENORMALIZATION
     SAVE_RAW_TRAJS = True
@@ -121,12 +329,24 @@ def generate_trajectories(model, all_gt_data, all_head, lengths, traj_mean, traj
     all_sol_np = []
     all_ground_truth_np = []
     all_indices = []
-    all_conditions = []
-    raw_gt_trajs = []  # For storing raw ground truth trajectories
 
-    indices = list(range(len(dataset)))
-    random_state = np.random.RandomState(42)
-    selected_indices = random_state.choice(indices, size=min(generate_num, len(indices)), replace=False)
+    evaluation_config = config.get('evaluation', {})
+    real_control_num = (
+        int(evaluation_config.get('real_control_samples', generate_num))
+        if evaluation_config.get('enabled', False)
+        else 0
+    )
+    selected_indices, real_control_indices = select_evaluation_indices(
+        len(dataset),
+        generate_num,
+        int(config.get('project', {}).get('seed', 42)),
+        real_control_num,
+    )
+    if evaluation_config.get('enabled', False) and len(real_control_indices) == 0:
+        raise ValueError(
+            "Control evaluation requires at least one test trajectory disjoint "
+            "from the generated sample"
+        )
     dataloader = DataLoader(dataset, batch_size=batch_size, sampler=selected_indices)
 
     # Initialize inference model
@@ -160,26 +380,30 @@ def generate_trajectories(model, all_gt_data, all_head, lengths, traj_mean, traj
             else:
                 condition_sample[:, 8] = transmode_switcher[condition_mode]
             condition_sample = condition_sample.to(device)
-            current_batch_size = x_1_sample.size(0)
+            unique_batch_size = x_1_sample.size(0)
 
             # Calculate correct indices for this batch
             start_idx = batch_idx * batch_size
-            end_idx = min(start_idx + current_batch_size, len(indices))
-            batch_indices = indices[start_idx:end_idx]
-            all_indices.extend(batch_indices)
+            end_idx = min(start_idx + unique_batch_size, len(selected_indices))
+            batch_indices = selected_indices[start_idx:end_idx].tolist()
+            all_indices.extend(
+                np.repeat(batch_indices, samples_per_condition).tolist()
+            )
 
-            # Extract raw ground truth for these indices
-            for idx in batch_indices:
-                if idx < len(all_gt_data):
-                    raw_traj = all_gt_data[selected_indices[idx]]
-                    if len(raw_traj) != M:
-                        raw_traj = resample_trajectory(raw_traj, config['data']['trajectory_length'])
-                    for k in range(2):
-                        raw_traj[:, k] = raw_traj[:, k] * traj_std[k] + traj_mean[k]
-                    raw_gt_trajs.append(raw_traj)
+            if samples_per_condition > 1:
+                x_1_sample = x_1_sample.repeat_interleave(
+                    samples_per_condition,
+                    dim=0,
+                )
+                condition_sample = condition_sample.repeat_interleave(
+                    samples_per_condition,
+                    dim=0,
+                )
+            current_batch_size = x_1_sample.size(0)
 
             print(
-                f"Processing batch {batch_idx + 1}/{(generate_num + batch_size - 1) // batch_size}, size: {current_batch_size}")
+                f"Processing batch {batch_idx + 1}/{(generate_num + batch_size - 1) // batch_size}, "
+                f"conditions: {unique_batch_size}, draws: {current_batch_size}")
 
             # Sample with condition using full input
             sol = inference.sample(n_samples=current_batch_size, n_steps=n_steps,
@@ -190,9 +414,22 @@ def generate_trajectories(model, all_gt_data, all_head, lengths, traj_mean, traj
         else:
             x_1_sample = batch_data.to(device)
             condition_sample = None
+            unique_batch_size = x_1_sample.size(0)
+            start_idx = batch_idx * batch_size
+            end_idx = min(start_idx + unique_batch_size, len(selected_indices))
+            batch_indices = selected_indices[start_idx:end_idx].tolist()
+            all_indices.extend(
+                np.repeat(batch_indices, samples_per_condition).tolist()
+            )
+            if samples_per_condition > 1:
+                x_1_sample = x_1_sample.repeat_interleave(
+                    samples_per_condition,
+                    dim=0,
+                )
             current_batch_size = x_1_sample.size(0)
             print(
-                f"Processing batch {batch_idx + 1}/{(generate_num + batch_size - 1) // batch_size}, size: {current_batch_size}")
+                f"Processing batch {batch_idx + 1}/{(generate_num + batch_size - 1) // batch_size}, "
+                f"conditions: {unique_batch_size}, draws: {current_batch_size}")
             # Sample without condition
             sol = inference.sample(n_samples=current_batch_size, n_steps=n_steps, method=solve_method)
 
@@ -288,72 +525,216 @@ def generate_trajectories(model, all_gt_data, all_head, lengths, traj_mean, traj
     if config['condition']['enabled'] and all_indices:
         for idx in all_indices:
             if idx < len(all_head):
-                total_cond_info.append(all_head[selected_indices[idx]])
+                total_cond_info.append(all_head[idx])
+    unique_cond_info = (
+        [all_head[index] for index in selected_indices]
+        if config['condition']['enabled'] else []
+    )
 
     # Convert final sample (last timestep) trajectories to the expected format
     total_gen_trajs = [x.reshape(traj_length, 2) for x in all_sol_np]
     total_gt_trajs = [x.reshape(traj_length, 2) for x in all_ground_truth_np]
+    paired_raw_reference = raw_dataset_trajectories(
+        dataset,
+        selected_indices,
+        config,
+        traj_mean,
+        traj_std,
+    )
+    raw_gt_trajs = [trajectory for trajectory in paired_raw_reference]
     if SAVE_RAW_TRAJS:
         total_raw_gt_trajs = [x.reshape(traj_length, 2) for x in all_raw_ground_truth_np]
         total_raw_gen_trajs = [x.reshape(traj_length, 2) for x in all_raw_sol_np]
 
     # Visualize the results using imported visualization functions
-    visualize_trajectories(total_gen_trajs, total_gt_trajs,
+    if config['data'].get('parametrized', False):
+        parameterization = config['data'].get(
+            'parametrized_method',
+            config['data'].get('para_method', 'rdp_k'),
+        )
+        representation_note = (
+            f"generated path interpolated from {M} {parameterization} control points; "
+            f"reference is the raw {traj_length}-point test path"
+        )
+    else:
+        representation_note = "direct point representation"
+    density_bins = int(evaluation_config.get('density_bins', 100))
+    visualization_reference = repeat_paired_references(
+        paired_raw_reference,
+        samples_per_condition,
+    )
+    visualize_trajectories(total_gen_trajs, visualization_reference,
                            config['data']['trajectory_length'],
-                           parametrized=False, save_folder=save_dir)
-    visualize_density_comparison(total_gen_trajs, total_gt_trajs,
+                           parametrized=False, save_folder=save_dir,
+                           representation_note=representation_note,
+                           grid_metadata=dataset.grid_metadata)
+    visualize_density_comparison(total_gen_trajs, visualization_reference,
                                  config['data']['trajectory_length'],
-                                 save_dir)
+                                 save_dir,
+                                 grid_metadata=dataset.grid_metadata,
+                                 density_bins=density_bins)
 
-    # Save trajectories separately
-    gen_df = save_trajectories_to_csv(
-        trajs=total_gen_trajs,
-        cond_info=total_cond_info,
-        cond_std=dataset.cond_std,
-        cond_mean=dataset.cond_mean,
-        save_dir=save_dir,
-        traj_type="generated"
+    # K>1 has a lossless compressed candidate bundle below.  Expanding the
+    # same arrays into several multi-million-row legacy CSVs adds no evidence
+    # and can dominate the diagnostic runtime.
+    if samples_per_condition == 1:
+        save_trajectories_to_csv(
+            trajs=total_gen_trajs,
+            cond_info=total_cond_info,
+            cond_std=dataset.cond_std,
+            cond_mean=dataset.cond_mean,
+            save_dir=save_dir,
+            traj_type="generated"
+        )
+
+        save_trajectories_to_csv(
+            trajs=total_gt_trajs,
+            cond_info=total_cond_info,
+            cond_std=dataset.cond_std,
+            cond_mean=dataset.cond_mean,
+            save_dir=save_dir,
+            traj_type="ground_truth"
+        )
+
+        if raw_gt_trajs:
+            save_trajectories_to_csv(
+                trajs=raw_gt_trajs,
+                cond_info=unique_cond_info,
+                cond_std=dataset.cond_std,
+                cond_mean=dataset.cond_mean,
+                save_dir=save_dir,
+                traj_type="raw_ground_truth"
+            )
+
+        if SAVE_RAW_TRAJS:
+            save_trajectories_to_csv(
+                trajs=total_raw_gen_trajs,
+                cond_info=total_cond_info,
+                cond_std=dataset.cond_std,
+                cond_mean=dataset.cond_mean,
+                save_dir=save_dir,
+                traj_type="generated_before_denormalization"
+            )
+            save_trajectories_to_csv(
+                trajs=total_raw_gt_trajs,
+                cond_info=total_cond_info,
+                cond_std=dataset.cond_std,
+                cond_mean=dataset.cond_mean,
+                save_dir=save_dir,
+                traj_type="ground_truth_before_denormalization"
+            )
+    else:
+        print(
+            "Skipping legacy row-wise trajectory CSVs for K>1; "
+            "best_of_k_candidates.npz preserves the candidate arrays."
+        )
+
+    metrics_path = None
+    generated_array = np.asarray(total_gen_trajs)
+    parameterized_target_array = np.asarray(total_gt_trajs)
+    if samples_per_condition > 1:
+        generated_for_metrics = generated_array.reshape(
+            len(selected_indices),
+            samples_per_condition,
+            traj_length,
+            2,
+        )
+        parameterized_target_for_manifest = parameterized_target_array.reshape(
+            len(selected_indices),
+            samples_per_condition,
+            traj_length,
+            2,
+        )
+    else:
+        generated_for_metrics = generated_array
+        parameterized_target_for_manifest = parameterized_target_array
+    manifest_arrays = {
+        'generated': generated_for_metrics,
+        'paired_raw_reference': paired_raw_reference,
+        'parameterized_training_target': parameterized_target_for_manifest,
+    }
+    if evaluation_config.get('enabled', False):
+        real_control_trajs = raw_dataset_trajectories(
+            dataset,
+            real_control_indices,
+            config,
+            traj_mean,
+            traj_std,
+        )
+        straight_line_control = origin_destination_straight_lines(
+            paired_raw_reference
+        )
+        if samples_per_condition == 1:
+            metrics = compute_control_metrics(
+                generated_array,
+                paired_raw_reference,
+                real_control_trajs,
+                parameterized_reference=parameterized_target_array,
+                grid_metadata=dataset.grid_metadata,
+                max_pairs=int(evaluation_config.get('max_curve_pairs', 200)),
+                density_bins=density_bins,
+            )
+            metrics_filename = 'baseline_metrics.json'
+        else:
+            np.savez_compressed(
+                os.path.join(save_dir, 'best_of_k_candidates.npz'),
+                generated_candidates=generated_for_metrics,
+                paired_raw_reference=paired_raw_reference,
+                selected_test_local_indices=selected_indices,
+            )
+            metrics = compute_best_of_k_metrics(
+                generated_for_metrics,
+                paired_raw_reference,
+                grid_metadata=dataset.grid_metadata,
+                density_bins=density_bins,
+                workers=metric_workers,
+            )
+            metrics_filename = 'best_of_k_metrics.json'
+        metrics_path = os.path.join(save_dir, metrics_filename)
+        with open(metrics_path, 'w', encoding='utf-8') as stream:
+            json.dump(metrics, stream, ensure_ascii=False, indent=2)
+            stream.write('\n')
+        print(f"Evaluation metrics saved to {metrics_path}")
+        manifest_arrays.update({
+            'independent_real_control': real_control_trajs,
+            'od_straight_line_control': straight_line_control,
+        })
+
+    dataset_profile_path = None
+    dataset_manifest_path = os.path.join(dataset.input_folder, 'manifest.csv')
+    if os.path.isfile(dataset_manifest_path):
+        dataset_profile_path = os.path.join(save_dir, 'dataset_profile.json')
+        write_dataset_profile(
+            dataset_profile_path,
+            dataset.input_folder,
+            region=config['data']['region'],
+            parameterization=config['data'].get(
+                'parametrized_method',
+                config['data'].get('para_method', 'rdp_k'),
+            ),
+            control_points=int(config['data'].get('parametrized_M', traj_length)),
+        )
+        print(f"Dataset profile saved to {dataset_profile_path}")
+
+    manifest_path = os.path.join(save_dir, 'generation_manifest.json')
+    write_generation_manifest(
+        manifest_path,
+        config_path=config_path,
+        checkpoint_path=checkpoint_path,
+        config=config,
+        dataset=dataset,
+        selected_indices=selected_indices,
+        control_indices=real_control_indices,
+        arrays=manifest_arrays,
+        metrics_path=metrics_path,
+        sampling_steps=n_steps,
+        sampling_method=solve_method,
+        condition_mode=condition_mode,
+        samples_per_condition=samples_per_condition,
+        metric_workers=metric_workers,
+        dataset_profile_path=dataset_profile_path,
     )
-
-    gt_df = save_trajectories_to_csv(
-        trajs=total_gt_trajs,
-        cond_info=total_cond_info,
-        cond_std=dataset.cond_std,
-        cond_mean=dataset.cond_mean,
-        save_dir=save_dir,
-        traj_type="ground_truth"
-    )
-
-    # Also save raw ground truth if available
-    if raw_gt_trajs:
-        raw_gt_df = save_trajectories_to_csv(
-            trajs=raw_gt_trajs,
-            cond_info=total_cond_info,
-            cond_std=dataset.cond_std,
-            cond_mean=dataset.cond_mean,
-            save_dir=save_dir,
-            traj_type="raw_ground_truth"
-        )
-
-    if SAVE_RAW_TRAJS:
-        # Save raw generated trajectories to CSV
-        total_raw_gen_df = save_trajectories_to_csv(
-            trajs=total_raw_gen_trajs,
-            cond_info=total_cond_info,
-            cond_std=dataset.cond_std,
-            cond_mean=dataset.cond_mean,
-            save_dir=save_dir,
-            traj_type="generated_before_denormalization"
-        )
-        # Save raw ground truth trajectories to CSV
-        total_raw_gt_df = save_trajectories_to_csv(
-            trajs=total_raw_gt_trajs,
-            cond_info=total_cond_info,
-            cond_std=dataset.cond_std,
-            cond_mean=dataset.cond_mean,
-            save_dir=save_dir,
-            traj_type="ground_truth_before_denormalization"
-        )
+    print(f"Generation manifest saved to {manifest_path}")
 
     return total_gen_trajs, total_gt_trajs, total_cond_info
 
@@ -505,6 +886,18 @@ def main():
     parser.add_argument("--num_batches", type=int, default=10, help="Number of batches to generate")
     parser.add_argument("--batch_size", type=int, default=32, help="batch_size for generation (default 32 for memory efficiency, reduce to 16 or 8 if OOM occurs)")
     parser.add_argument("--generate_num", type=int, default=1000, help="Total num for generation")
+    parser.add_argument(
+        "--samples-per-condition",
+        type=int,
+        default=1,
+        help="Independent draws per selected condition (K for best-of-K evaluation)",
+    )
+    parser.add_argument(
+        "--metric-workers",
+        type=int,
+        default=1,
+        help="CPU processes used for candidate/reference DTW and Frechet metrics",
+    )
     parser.add_argument("--placeholder", type=str, default='real', help="Use placeholder conditions")
     parser.add_argument("--USE_GIVEN_STEPS", type=bool, default=False, help="If using the number of given sampling steps parameters")
     parser.add_argument("--steps", type=int, default=10, help="Number of sampling steps")
@@ -514,7 +907,7 @@ def main():
     args = parser.parse_args()
 
     # args.exp_savename_str can be used to select a run folder by timestamp.
-    args.output_dir = './%s/%s'%(args.generate_results_dir,args.exp_savename_str)
+    args.output_dir = f'./{args.generate_results_dir}/{args.exp_savename_str}'
     # Condition mode based on argument
     condition_mode = args.placeholder
     print(f"Using {condition_mode} conditions for generation")
@@ -531,6 +924,12 @@ def main():
             config_dict = yaml.safe_load(f)
         config = config_dict
         model_dir = os.path.dirname(args.config)
+
+    seed = int(config.get('project', {}).get('seed', 42))
+    seed_everything(
+        seed,
+        deterministic=bool(config.get('project', {}).get('deterministic', True)),
+    )
 
     global device
     configured_device = config.get("training", {}).get("device", "cuda:0")
@@ -576,8 +975,9 @@ def main():
                 return -1
 
     # Create results directory
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     result_dir = os.path.join(args.output_dir, f"generation_{args.generate_num}_{condition_mode}_test")
+    if args.samples_per_condition > 1:
+        result_dir += f"_k{args.samples_per_condition}"
     if args.USE_GIVEN_STEPS:
         result_dir += f"_steps_{args.steps}"
     else:
@@ -585,47 +985,36 @@ def main():
     os.makedirs(result_dir, exist_ok=True)
 
     # Save config for reference
-    print('!!!args.USE_GIVEN_STEPS %s' % args.USE_GIVEN_STEPS)
+    print(f'!!!args.USE_GIVEN_STEPS {args.USE_GIVEN_STEPS}')
     if args.USE_GIVEN_STEPS:
         config_dict['ddpm']['ddim_steps'] = args.steps
-        # config_dict['inference']['num_steps'] = args.steps
+        config_dict['inference']['num_steps'] = args.steps
+        effective_steps = args.steps
         print(f"Using given sampling steps: {args.steps}")
     else:
-        print(f"Using config sampling steps: {config_dict['ddpm']['ddim_steps']}")
+        if config_dict.get('ddpm', {}).get('enabled', False):
+            effective_steps = config_dict['ddpm']['ddim_steps']
+        else:
+            effective_steps = config_dict['inference']['num_steps']
+        print(f"Using config sampling steps: {effective_steps}")
 
-    with open(os.path.join(result_dir, 'config.yaml'), 'w') as f:
+    run_config_path = os.path.join(result_dir, 'config.yaml')
+    with open(run_config_path, 'w') as f:
         yaml.dump(config_dict, f)
 
-    # Load data from open-source public regions only.
-    PROJ_PATH = '.'
-    FOLDERS = {
-        'Chengdu': f'{PROJ_PATH}/data/DiDiTaxi_Chengdu_traj',
-        'XiAn': f'{PROJ_PATH}/data/DiDiTaxi_XiAn_traj',
-    }
-    custom_folder = config['data'].get('dataset_folder', '')
-    if custom_folder:
-        folder = custom_folder if os.path.isabs(custom_folder) else os.path.join(PROJ_PATH, custom_folder)
-    else:
-        region = config['data']['region']
-        if region not in FOLDERS:
-            raise ValueError(f"Unsupported open-source region: {region}. Use Chengdu or XiAn.")
-        folder = FOLDERS[region]
-        if not os.path.exists(folder):
-            import glob
-
-            fallback_candidates = glob.glob(f"{folder}*")
-            fallback_candidates = [p for p in fallback_candidates if os.path.isdir(p)]
-            if fallback_candidates:
-                folder = sorted(fallback_candidates)[0]
-    (all_head, traj_mean, traj_std, lengths,
-     cond_mean, cond_std, all_gt_data, grid_mapping_dict) = PrepareDataset.loadExistingData(
-        folder, resample_length=config['data']['trajectory_length'])
-
-    # Create dataset (for condition dimension info)
-    dataset = FlowMatchingDataset(config_dict, mode='eval')
+    # Evaluation uses the test split selected by FlowMatchingDataset. Reusing
+    # the dataset-owned arrays prevents accidental indexing into the full file.
+    dataset = FlowMatchingDataset(config_dict, mode='test')
+    all_head = dataset.all_head
+    traj_mean = dataset.traj_mean
+    traj_std = dataset.traj_std
+    lengths = dataset.lengths
+    cond_mean = dataset.cond_mean
+    cond_std = dataset.cond_std
+    all_gt_data = getattr(dataset, 'traj_segments_before_stdize', dataset.traj_segments)
 
     # Create model
-    input_dim = config['data']['trajectory_length']*2  # Trajectory coordinate dimension
+    input_dim = model_input_dim(config)
     hidden_dim = config['model']['hidden_dim']
     condition_dim = dataset.location_dim
 
@@ -713,6 +1102,14 @@ def main():
         model.eval()
         print("Flow matching model loaded successfully")
 
+    if config.get('training', {}).get('data_parallel', False):
+        if device.type == 'cuda' and torch.cuda.device_count() > 1:
+            model = torch.nn.DataParallel(model).to(device)
+            model.eval()
+            print(f"Using DataParallel across {torch.cuda.device_count()} visible GPUs")
+        else:
+            print("data_parallel requested, but fewer than two CUDA devices are visible")
+
     # Print memory usage information
     if torch.cuda.is_available():
         allocated = torch.cuda.memory_allocated(device) / 1024**3
@@ -720,18 +1117,8 @@ def main():
         print(f"GPU Memory: {allocated:.2f}GB allocated, {reserved:.2f}GB reserved")
         print(f"Inference batch size: {args.batch_size} (reduce if OOM occurs)")
 
-    # Load given parameters if specified
-    # Get sampling parameters from config
-    if args.USE_GIVEN_STEPS:
-        config['inference']['num_steps'] = args.steps
-        config['ddpm']['ddim_steps'] = args.steps
-        print(f"Using given sampling steps: {args.steps}")
-    else:
-        pass
-        print(f"Using config sampling steps")
-
     # Generate trajectories
-    gen_trajs, gt_trajs, cond_info = generate_trajectories(
+    gen_trajs, _gt_trajs, _cond_info = generate_trajectories(
         model=model,
         all_gt_data=all_gt_data,
         all_head=all_head,
@@ -746,11 +1133,19 @@ def main():
         result_dir=result_dir,
         dataset=dataset,
         condition_mode=condition_mode,
-        generate_num = args.generate_num,
-        save_dir=result_dir
+        generate_num=args.generate_num,
+        save_dir=result_dir,
+        checkpoint_path=checkpoint_path,
+        config_path=run_config_path,
+        samples_per_condition=args.samples_per_condition,
+        metric_workers=args.metric_workers,
     )
 
     print(f"Generation complete. Results saved to {result_dir}")
-    print(f"Generated {len(gen_trajs)} trajectories using {args.steps} steps with {effective_method} method")
+    print(
+        f"Generated {len(gen_trajs)} trajectories for {args.generate_num} selected "
+        f"conditions at K={args.samples_per_condition} using {effective_steps} steps "
+        f"with {effective_method} method"
+    )
 if __name__ == "__main__":
     main()

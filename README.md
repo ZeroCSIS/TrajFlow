@@ -42,6 +42,140 @@ python data/make_toy_data.py
 python train.py --config ./src/config/config_toy.yaml
 ```
 
+### YJMob100K Dataset1 engineering smoke
+
+TIME-18 adds a bounded public-data adapter for the official
+[YJMob100K v3 release](https://zenodo.org/records/10836269). Review its CC BY
+4.0 terms and ethical-use restrictions before downloading it. The expected
+Dataset1 checksum is `3781f6f03a118b5f639bdb4f94dcfdb8` (MD5).
+
+```bash
+mkdir -p data/raw/yjmob100k
+curl -L \
+  -o data/raw/yjmob100k/yjmob100k-dataset1.csv.gz \
+  https://zenodo.org/api/records/10836269/files/yjmob100k-dataset1.csv.gz/content
+
+python data_utils/prepare_yjmob.py \
+  --input data/raw/yjmob100k/yjmob100k-dataset1.csv.gz \
+  --output-dir data/processed/yjmob100k_d1_1k \
+  --max-users 1000
+
+# Physical cards 2 and 3 become visible logical cards 0 and 1.
+CUDA_VISIBLE_DEVICES=2,3 python train.py \
+  --config src/config/config_yjmob_smoke.yaml \
+  --run-name yjmob1k-smoke
+
+# Replace this value with the directory name printed by train.py.
+RUN_NAME="yjmob1k-smoke_seed42_YYYYMMDD_HHMMSS_microseconds"
+CUDA_VISIBLE_DEVICES=2,3 python generate.py \
+  --config "outputs_yjmob_smoke/${RUN_NAME}/config.yaml" \
+  --checkpoint "outputs_yjmob_smoke/models/${RUN_NAME}/best_model.pt" \
+  --device cuda:0 \
+  --generate_num 200 \
+  --batch_size 32 \
+  --exp_savename_str "${RUN_NAME}"
+```
+
+The converter excludes day 27, treats each user-day as one sample, resamples
+the observed 30-minute slots to 120 points, and stores `uid`/`day` only in
+`manifest.csv`. Train/validation/test membership is a deterministic SHA-256
+hash of the user id, so one user cannot leak across splits. Continuous
+condition statistics are fitted on the training split only.
+
+`config_yjmob_smoke.yaml` runs only two epochs and is an engineering check, not
+a reported baseline. It enables portable checkpoints, validation-based model
+selection, deterministic seeds, two-visible-GPU `DataParallel`, and generation
+metrics (density Jensen-Shannon divergence, paired exact DTW, and continuous
+Fréchet distance). Generation writes these values to `baseline_metrics.json`.
+Use a different `--seed` for an independent repeat.
+
+The bounded convergence configuration keeps the same data representation,
+model, objective, seed, and evaluation protocol. It raises only the training
+horizon to 100 epochs, stops after 10 validation epochs without improvement,
+and retains only `best_model.pt` plus `last_model.pt`. Expose only a confirmed
+idle physical card from the approved set before launching it:
+
+```bash
+CUDA_VISIBLE_DEVICES=<2-or-3> python train.py \
+  --config src/config/config_yjmob_convergence.yaml \
+  --run-name yjmob1k-convergence
+```
+
+### Conditional coverage and longitudinal-habit diagnostics
+
+Best-of-K generation reuses the frozen checkpoint and the same deterministic
+test-condition selection. `--generate_num` is the number of unique conditions;
+`--samples-per-condition` is the number of independent draws for each one:
+
+```bash
+CUDA_VISIBLE_DEVICES=<confirmed-idle-card> python generate.py \
+  --config /path/to/frozen/config.yaml \
+  --checkpoint /path/to/best_model.pt \
+  --device cuda:0 \
+  --generate_num 200 \
+  --samples-per-condition 20 \
+  --metric-workers 8 \
+  --batch_size 8 \
+  --exp_savename_str yjmob1k-best-of-20
+```
+
+For K greater than one, generation writes `best_of_k_metrics.json` and a
+compressed candidate array instead of expanding the same arrays into the legacy
+row-wise trajectory CSVs. The report contains the minimum paired exact DTW
+and continuous Fréchet distance across K, all-pair aligned-point diversity, a
+deterministic O-to-D line control, and separate point/trajectory OOB rates.
+Best-of-K is an oracle coverage diagnostic: increasing K can improve it by
+construction, so it is not a training or model-selection gate.
+
+Freeze a completed best-of-K run into the baseline scorecard and explicit
+same-origin/destination acceptance set without rerunning the model:
+
+```bash
+python data_utils/build_yjmob_baseline_scorecard.py \
+  --metrics /path/to/best_of_k_metrics.json \
+  --manifest /path/to/generation_manifest.json \
+  --candidates /path/to/best_of_k_candidates.npz \
+  --output-dir outputs_yjmob_closeout/ \
+  --workers 4
+```
+
+The builder verifies the input checksum and selected condition indices,
+recomputes the per-condition O-to-D line distances, reconciles aggregate
+medians/OOB counts, reports K-prefix diagnostics, and writes every O=D case to
+`same_od_acceptance_set.csv`. The set is a structural diagnostic for future
+representations, not a new training gate.
+
+The raw-data habit profiler uses the exact user cohort retained in a prepared
+manifest and never uses the 120-point interpolation:
+
+```bash
+python data_utils/analyze_yjmob_habits.py \
+  --input data/raw/yjmob100k/yjmob100k-dataset1.csv.gz \
+  --manifest data/processed/yjmob100k_d1_1k/manifest.csv \
+  --output-dir outputs_yjmob_habits/seed42-1k \
+  --null-repeats 20 \
+  --seed 42
+```
+
+It reports raw-slot coverage and internal gaps, per-user/per-timeslot modal-cell
+rates, chronological holdout accuracy against a population-timeslot control,
+lagged cross-day similarity, and a null that shuffles locations only among each
+user-day's observed timeslots. It also writes a consistency fingerprint for all
+observations, confirmed adjacent transition arrivals, and observations away
+from the user-day's modal cell. For generation, these real-data rates are
+targets to match rather than values to maximize; substantially higher rates can
+mean synthetic-person diversity has collapsed.
+
+The stay/transition profile is deliberately conservative: a transition needs
+two adjacent raw half-hour slots at different cells, a confirmed stay needs at
+least two adjacent pings at one cell, and every missing slot terminates the
+segment. Gaps bounded by the same or different cells are counted separately but
+remain unassigned. The official data descriptor defines `d` as a masked date
+and does not publish its civil-date mapping. Consequently, the profiler reports
+all seven `d % 7` offsets and an explicitly inferred "weekend-like"
+low-activity phase pair; it never assigns civil weekday names or attempts to
+reverse-engineer the hidden calendar.
+
 Training:
 ```bash
 python train.py --config ./src/config/config_chengdu.yaml

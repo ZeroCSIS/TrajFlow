@@ -1,5 +1,6 @@
 chardet
-flow_matching @ git+https://github.com/facebookresearch/flow_matching.git
+curvesimilarities==0.3.0
+flow_matching @ git+https://github.com/facebookresearch/flow_matching.git@11568d37f8d5a080e12aa7b5305d9c35ae07d136
 fastdtw
 geopandas
 jismesh

@@ -1,13 +1,15 @@
 import json
+import os
+
+import numpy as np
 import torch
 from torch.utils.data import Dataset
-import numpy as np
-import os
-from pathlib import Path
-from src.data.transforms import point2para
-import jismesh.utils as ju
-import src.utils.jismesh_v2.jismesh.utils as ju_v2
 from tqdm import tqdm
+
+import src.utils.jismesh_v2.jismesh.utils as ju_v2
+from src.data.transforms import point2para
+from src.data.validation import summarize_parameterized_targets
+
 
 def map_two_columns_to_shared_range(input_array):
     # Flatten the array to get all integers in one list
@@ -105,11 +107,17 @@ class FlowMatchingDataset(Dataset):
             mode: 'train' or 'eval'
         """
         super().__init__()
+        if mode not in {'train', 'val', 'test', 'eval', 'all'}:
+            raise ValueError("mode must be one of train, val, test, eval, or all")
+        self.mode = 'test' if mode == 'eval' else mode
         self.traj_length = config['data']['trajectory_length']
         self.traj_dim = self.traj_length * 2
-        self.dataset_size = config['data']['sample_count']
+        self.requested_sample_count = config['data']['sample_count']
+        self.dataset_size = self.requested_sample_count
         self.dataset_type = config['data']['dataset_type']
         self.output_dir = config['project']['output_dir']
+        self.split_indices_path = None
+        self.parameterization_workers = config['data'].get('parameterization_workers')
 
         if self.dataset_type in {"didi", "open_source", "bwtraj"}:
             self._load_trajectory_data(config)
@@ -128,66 +136,129 @@ class FlowMatchingDataset(Dataset):
             self._prepare_conditions()
 
         if config['data']['parametrized']:
+            parameterization_source = np.asarray(self.traj_segments)
+            source_has_movement = bool(
+                np.any(np.ptp(parameterization_source, axis=1) > 1e-8)
+            )
             # Reuse cached parameterized trajectories when available.
+            if self.split_indices_path is None:
+                cache_dir = os.path.dirname(self.input_folder)
+                cache_suffix = ''
+            else:
+                cache_dir = self.input_folder
+                cache_suffix = f"_{self.mode}"
             processed_data_path = os.path.join(
-                os.path.dirname(self.input_folder),
+                cache_dir,
                 f"processed_coeffs_{config['data']['region']}_"
                 f"{config['data']['parametrized_method']}_"
-                f"{config['data']['parametrized_M']}.npy"
+                f"{config['data']['parametrized_M']}{cache_suffix}.npy"
             )
+            cache_valid = False
             if os.path.exists(processed_data_path):
                 print(f"Loading pre-processed coefficients from {processed_data_path}")
+                source_trajectories = np.asarray(self.traj_segments)
                 self.coffs = np.load(processed_data_path)
-                self.traj_segments = self.coffs[:self.dataset_size]
+                expected_shape = (
+                    self.dataset_size,
+                    int(config['data']['parametrized_M']),
+                    2,
+                )
+                cache_is_finite = np.isfinite(self.coffs).all()
+                cache_is_suspiciously_zero = (
+                    np.any(np.abs(source_trajectories) > 1e-12)
+                    and not np.any(np.abs(self.coffs) > 1e-12)
+                )
+                if (
+                    self.coffs.shape == expected_shape
+                    and cache_is_finite
+                    and not cache_is_suspiciously_zero
+                ):
+                    self.traj_segments = self.coffs
+                    cache_valid = True
+                else:
+                    print(
+                        "Ignoring invalid coefficient cache: "
+                        f"shape={self.coffs.shape}, expected={expected_shape}, "
+                        f"finite={cache_is_finite}, all_zero={not np.any(self.coffs)}"
+                    )
+                    self.traj_segments = source_trajectories
+                    self._convert_to_coefficients(
+                        para_M=config['data']['parametrized_M'],
+                        method=config['data']['parametrized_method'],
+                    )
             else:
                 self._convert_to_coefficients(para_M=config['data']['parametrized_M'],
                                               method=config['data']['parametrized_method'])
-            # Cache the full-dataset coefficients next to the source data.
-            if config['data']['sample_count'] == -1:
-                print(f"Saving processed coefficients to {processed_data_path}")
-                os.makedirs(os.path.dirname(processed_data_path), exist_ok=True)
-                np.save(processed_data_path, self.coffs)
+            # Cache complete split coefficients next to the converted dataset.
+            if self.requested_sample_count == -1:
+                if not cache_valid:
+                    print(f"Saving processed coefficients to {processed_data_path}")
+                    os.makedirs(os.path.dirname(processed_data_path), exist_ok=True)
+                    np.save(processed_data_path, self.coffs)
             else:
                 print(f"Skipping saving coefficients (partial dataset with {self.dataset_size} samples)")
+            self.parameterized_target_summary = summarize_parameterized_targets(
+                self.traj_segments,
+                configured_control_points=int(config['data']['parametrized_M']),
+                source_has_movement=source_has_movement,
+            )
+            distinct = self.parameterized_target_summary[
+                'distinct_control_points'
+            ]
+            print(
+                "Parameterized target preflight passed: "
+                f"shape={tuple(self.traj_segments.shape)}, "
+                f"distinct_points_p10/p50/p90="
+                f"{distinct['p10']:.0f}/{distinct['p50']:.0f}/{distinct['p90']:.0f}"
+            )
         else:
             pass
 
     def _prepare_conditions(self):
            """Prepare conditions based on configuration"""
            if self.condition_type == 'od':
-               self.conditions = self.all_head
+               self.conditions = self.all_head.copy()
                # Because the sampled data is not the same as the original data, we need to record the OD mapping dict
                # Map the last two columns (o,d) to a shared range
-               self.conditions[:, 6:8], self.onehot_mapping_dict, max_unique_length = (
-                   map_two_columns_to_shared_range(self.conditions[:, 6:8]))
+               self._prepare_location_ids()
                self.conditions = self.conditions[:, 6:8]
-               self.location_dim = max_unique_length
-               # revalue the value of the grid_mapping_dict
-               # replace the key with the value of the onehot_mapping_dict
-               # drop the items that are not in the onehot_mapping_dict
-               cr_sample_grid_mapping_dict = {}
-               for key, value in self.onehot_mapping_dict.items():
-                   cr_sample_grid_mapping_dict[value] = self.grid_mapping_dict[key]
-               self.cr_sample_grid_mapping_dict = cr_sample_grid_mapping_dict
            elif self.condition_type == 'full':
-               self.conditions = self.all_head
+               self.conditions = self.all_head.copy()
                # Because the sampled data is not the same as the original data, we need to record the OD mapping dict
                # Map the last two columns (o,d) to a shared range
-               self.conditions[:, 6:8], self.onehot_mapping_dict, max_unique_length = (
-                   map_two_columns_to_shared_range(self.conditions[:, 6:8]))
-               self.location_dim = max_unique_length
-               # revalue the value of the grid_mapping_dict
-               # replace the key with the value of the onehot_mapping_dict
-               # drop the items that are not in the onehot_mapping_dict
-               cr_sample_grid_mapping_dict = {}
-               for key, value in self.onehot_mapping_dict.items():
-                   cr_sample_grid_mapping_dict[value] = self.grid_mapping_dict[key]
-               self.cr_sample_grid_mapping_dict = cr_sample_grid_mapping_dict
+               self._prepare_location_ids()
            else:
                # Default empty conditions
                self.conditions = np.zeros((self.dataset_size, self.condition_dim))
            # Convert to tensor
            self.conditions = torch.FloatTensor(self.conditions)
+
+    def _prepare_location_ids(self):
+        """Prepare a stable location vocabulary, or retain the legacy local remap."""
+        ids_are_mapped = self.grid_metadata.get('condition_ids_are_mapped', False)
+        fixed_location_dim = self.grid_metadata.get('fixed_location_dim')
+        if ids_are_mapped and fixed_location_dim is not None:
+            location_ids = self.conditions[:, 6:8].astype(np.int64)
+            if location_ids.size and (
+                location_ids.min() < 0 or location_ids.max() >= int(fixed_location_dim)
+            ):
+                raise ValueError("Condition location id is outside fixed_location_dim")
+            self.conditions[:, 6:8] = location_ids
+            self.location_dim = int(fixed_location_dim)
+            observed_ids = np.unique(location_ids)
+            self.onehot_mapping_dict = {int(value): int(value) for value in observed_ids}
+            self.cr_sample_grid_mapping_dict = dict(self.grid_mapping_dict)
+            return
+
+        mapped, mapping_dict, max_unique_length = map_two_columns_to_shared_range(
+            self.conditions[:, 6:8]
+        )
+        self.conditions[:, 6:8] = mapped
+        self.onehot_mapping_dict = mapping_dict
+        self.location_dim = max_unique_length
+        self.cr_sample_grid_mapping_dict = {
+            value: self.grid_mapping_dict[key] for key, value in mapping_dict.items()
+        }
 
     def _load_trajectory_data(self, config):
         """Load trajectory data from open-source dataset folders."""
@@ -236,13 +307,35 @@ class FlowMatchingDataset(Dataset):
             self.grid_encoding = 'geohash'
             self.grid_metadata = {'encoding': 'geohash', 'geohash_precision': precision}
 
-        # Limit dataset size based on available data
-        if self.dataset_size == -1:
-            self.dataset_size = len(self.traj_segments)
+        split_filename = config['data'].get('split_file', 'split_indices.npz')
+        candidate_split_path = os.path.join(self.input_folder, split_filename)
+        self.split_indices_path = candidate_split_path if os.path.exists(candidate_split_path) else None
+        available_count = len(self.traj_segments)
+        if len(self.all_head) != available_count:
+            raise ValueError("conditions.pkl and traj_segments.pkl have different sample counts")
+        if self.split_indices_path is not None and self.mode != 'all':
+            with np.load(self.split_indices_path) as split_file:
+                if self.mode not in split_file.files:
+                    raise ValueError(
+                        f"Split file {self.split_indices_path} does not contain '{self.mode}'"
+                    )
+                selected_indices = np.asarray(split_file[self.mode], dtype=np.int64)
+            if selected_indices.size and (
+                selected_indices.min() < 0 or selected_indices.max() >= available_count
+            ):
+                raise ValueError(f"Split '{self.mode}' contains an out-of-range sample index")
         else:
-            self.dataset_size = min(self.dataset_size, len(self.traj_segments))
-        self.traj_segments = self.traj_segments[:self.dataset_size]
-        self.all_head = self.all_head[:self.dataset_size]
+            selected_indices = np.arange(available_count, dtype=np.int64)
+
+        if self.requested_sample_count != -1:
+            selected_indices = selected_indices[:self.requested_sample_count]
+        if selected_indices.size == 0:
+            raise ValueError(f"The '{self.mode}' dataset split is empty")
+        self.sample_indices = selected_indices
+        self.traj_segments = np.asarray(self.traj_segments)[selected_indices]
+        self.all_head = np.asarray(self.all_head)[selected_indices]
+        self.lengths = np.asarray(self.lengths)[selected_indices]
+        self.dataset_size = len(selected_indices)
 
         # get the odfiner in config, if not, set as False
         self.od_finer = config['data'].get('od_finer', False)
@@ -359,7 +452,7 @@ class FlowMatchingDataset(Dataset):
             if para_dict is not None:
                 return para_dict['simplified_points']
             else:
-                return np.zeros((para_M, 2))  # Fallback if parameterization fails
+                return None
         elif method == 'rdp_k_withod':
             # Special case for methods that need start/end point info
             para_dict = {
@@ -371,7 +464,7 @@ class FlowMatchingDataset(Dataset):
             if para_dict is not None:
                 return para_dict['simplified_points']
             else:
-                return np.zeros((para_M, 2))
+                return None
         else:
             print(f"Warning: Using {method} for parameterization")
             return point2para(traj, method=method)
@@ -381,28 +474,57 @@ class FlowMatchingDataset(Dataset):
         import multiprocessing as mp
         from functools import partial
 
-        # Determine number of processes (use half of available cores)
-        num_processes = max(1, mp.cpu_count()//2)
-        print(f"Converting trajectories using {num_processes} processes...")
+        # One worker is intentionally supported for notebooks, stdin-driven
+        # checks, and platforms whose multiprocessing start method is spawn.
+        if self.parameterization_workers is None:
+            num_processes = max(1, mp.cpu_count() // 2)
+        else:
+            num_processes = max(1, int(self.parameterization_workers))
+        num_processes = min(num_processes, self.dataset_size)
+        print(f"Converting trajectories using {num_processes} worker(s)...")
 
         # Create partial function with fixed parameters
         process_func = partial(self._process_trajectory, para_M=para_M, method=method)
 
-        # Process in batches using multiprocessing Pool
         coeffs = np.zeros((self.dataset_size, para_M, 2))
-        with mp.Pool(processes=num_processes) as pool:
+        if num_processes == 1:
             results = list(tqdm(
-                pool.imap(process_func, self.traj_segments, chunksize=1000),
+                map(process_func, self.traj_segments),
                 total=self.dataset_size,
                 desc=f"Parameterizing with {method}"
             ))
+        else:
+            chunksize = max(1, min(1000, self.dataset_size // (num_processes * 4)))
+            with mp.Pool(processes=num_processes) as pool:
+                results = list(tqdm(
+                    pool.imap(process_func, self.traj_segments, chunksize=chunksize),
+                    total=self.dataset_size,
+                    desc=f"Parameterizing with {method}"
+                ))
 
         # Collect results
+        failed_indices = []
         for i, result in enumerate(results):
             if result is not None:
                 coeffs[i] = result
             else:
-                print(f"Warning: Parameterization failed for trajectory {i}")
+                failed_indices.append(i)
+        if failed_indices:
+            preview = failed_indices[:10]
+            raise RuntimeError(
+                f"Parameterization failed for {len(failed_indices)} trajectories; "
+                f"first indices: {preview}"
+            )
+        if not np.isfinite(coeffs).all():
+            raise RuntimeError("Parameterization produced NaN or infinite coefficients")
+        source_trajectories = np.asarray(self.traj_segments)
+        if (
+            np.any(np.abs(source_trajectories) > 1e-12)
+            and not np.any(np.abs(coeffs) > 1e-12)
+        ):
+            raise RuntimeError(
+                "Parameterization collapsed a non-degenerate dataset to an all-zero cache"
+            )
         self.coffs = coeffs
         self.traj_segments = self.coffs
 

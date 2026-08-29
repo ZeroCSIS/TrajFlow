@@ -6,6 +6,25 @@ from scipy.linalg import LinAlgError
 from rdp import rdp  # <<< Import RDP
 
 
+def point_line_distance_2d(point, start, end):
+    """Perpendicular distance that remains valid with NumPy 2.x.
+
+    rdp 0.8's default distance calls ``np.cross`` on two-dimensional vectors.
+    NumPy 2.x rejects that formerly supported operation, so every RDP conversion
+    was caught as a failure and silently replaced with zeros by the dataset code.
+    """
+    point = np.asarray(point, dtype=np.float64)
+    start = np.asarray(start, dtype=np.float64)
+    end = np.asarray(end, dtype=np.float64)
+    segment = end - start
+    denominator = float(np.linalg.norm(segment))
+    if denominator < 1e-12:
+        return float(np.linalg.norm(point - start))
+    offset = point - start
+    cross_magnitude = abs(segment[0] * offset[1] - segment[1] * offset[0])
+    return float(cross_magnitude / denominator)
+
+
 # --- Functions: compute_arc_length_t, detect_anchors, _calculate_knots, _calculate_curvature (keep as before) ---
 # (Implementations from previous responses)
 # ... (ensure these helper functions are present) ...
@@ -429,7 +448,11 @@ def point2para(points, method='dct', **kwargs):
                 if eps_mid < 1e-10: break
 
                 # Apply RDP with the current epsilon guess
-                simplified = rdp(uniform_curve, epsilon=eps_mid)
+                simplified = rdp(
+                    uniform_curve,
+                    epsilon=eps_mid,
+                    dist=point_line_distance_2d,
+                )
                 n_pts = len(simplified)
 
                 # Adjust search range based on number of points found
